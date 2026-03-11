@@ -34,6 +34,7 @@ class Game {
 
     // Water
     this.waterLevel = -15.5;
+    this.terrain.setWaterLevel(this.waterLevel);
     this.waterTime = 0;
     this.waterBaseFogDensity = 0.0025;
     this.underwaterFogDensity = 0.012;

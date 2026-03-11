@@ -4,6 +4,7 @@
  */
 class PerlinNoise {
   constructor(seed) {
+    this.seedValue = seed || Math.random();
     this.grad3 = [
       [1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],
       [1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],
@@ -12,10 +13,11 @@ class PerlinNoise {
     this.perm = new Uint8Array(512);
     this.gradP = new Array(512);
 
-    this.seed(seed || Math.random());
+    this.seed(this.seedValue);
   }
 
   seed(val) {
+    this.seedValue = val;
     const p = new Uint8Array(256);
     // Simple seeded shuffle
     let s = Math.floor(val * 65536) || 1;

@@ -7,3 +7,4 @@ Add weather. Clouds are randomized with multi-layered perlin noise so that somti
 Add a debug menu that appears when pressing "Enter"
 This menu should provide options to change the time of day, speed of the daytime cycle.
  
+Time should be rendered on client side, but should be universal for multiple players, so it should be controlled by the server. It should be connected to real life time so that 2 hours = one daylight cycle, but that even if the server is off, time keeps running.

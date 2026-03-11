@@ -1,0 +1,9 @@
+
+
+Add weather. Clouds are randomized with multi-layered perlin noise so that somtimes there are no clouds at all, and sometimes there are a lot of clouds. This cloud "texture" should move across the sky at "weather-speed". Clouds get darker there more there are and when the sky is full of clouds, make it rain.
+
+
+
+Add a debug menu that appears when pressing "Enter"
+This menu should provide options to change the time of day, speed of the daytime cycle.
+ 

@@ -214,6 +214,7 @@
       width: 100%;
       height: 100%;
       pointer-events: none;
+      z-index: 1;
     }
 
     #hud-top {
@@ -287,6 +288,54 @@
       font-family: monospace;
     }
 
+    #stamina-container {
+      position: absolute;
+      bottom: 50px;
+      left: 16px;
+      width: 160px;
+      background: rgba(0,0,0,0.5);
+      padding: 8px 14px;
+      border-radius: 6px;
+    }
+
+    #stamina-label {
+      font-size: 0.75rem;
+      color: #999;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+
+    #stamina-bar-bg {
+      width: 100%;
+      height: 6px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    #stamina-bar {
+      height: 100%;
+      width: 100%;
+      background: linear-gradient(90deg, #00d2ff, #7b2ff7);
+      transition: width 0.05s ease-out;
+    }
+
+    #crouch-indicator {
+      position: absolute;
+      bottom: 84px;
+      left: 16px;
+      display: none;
+      background: rgba(255,200,0,0.15);
+      border: 1px solid rgba(255,200,0,0.4);
+      color: #ffc800;
+      font-size: 0.8rem;
+      padding: 4px 12px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
     #player-names {
       position: absolute;
       top: 0;
@@ -321,6 +370,207 @@
       text-align: center;
       pointer-events: auto;
       cursor: pointer;
+    }
+
+    /* ---- Pause Menu ---- */
+    #pause-menu {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 100;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      pointer-events: auto;
+    }
+
+    .pause-panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      width: 320px;
+    }
+
+    .pause-title {
+      color: #fff;
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin-bottom: 18px;
+      text-shadow: 2px 2px 0 rgba(0,0,0,0.8);
+    }
+
+    .pause-btn {
+      width: 100%;
+      padding: 14px 0;
+      border: none;
+      border-radius: 4px;
+      background: #4a4a4a;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      letter-spacing: 0.5px;
+      text-shadow: 1px 1px 0 rgba(0,0,0,0.6);
+      box-shadow: inset 0 -3px 0 rgba(0,0,0,0.35), inset 0 3px 0 rgba(255,255,255,0.1);
+      transition: filter 0.1s, transform 0.1s;
+    }
+
+    .pause-btn:hover {
+      filter: brightness(1.25);
+    }
+
+    .pause-btn:active {
+      transform: translateY(2px);
+      box-shadow: inset 0 -1px 0 rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.1);
+    }
+
+    .pause-btn.primary {
+      background: #5b7a3e;
+    }
+
+    .pause-btn.danger {
+      background: #7a3e3e;
+    }
+
+    .pause-divider {
+      width: 100%;
+      height: 1px;
+      background: rgba(255,255,255,0.12);
+      margin: 6px 0;
+    }
+
+    /* ---- Settings Menu ---- */
+    #settings-menu {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.8);
+      backdrop-filter: blur(6px);
+      z-index: 110;
+      justify-content: center;
+      align-items: center;
+      pointer-events: auto;
+    }
+
+    .settings-panel {
+      background: rgba(14,14,26,0.98);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 32px 36px;
+      width: 460px;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+
+    .settings-panel h2 {
+      color: #fff;
+      font-size: 1.3rem;
+      margin-bottom: 22px;
+      letter-spacing: 1px;
+    }
+
+    .settings-section-title {
+      color: #666;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      margin: 18px 0 10px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+
+    .settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .settings-row label {
+      color: #ccc;
+      font-size: 0.9rem;
+      flex: 1;
+    }
+
+    .settings-row input[type="range"] {
+      width: 150px;
+      accent-color: #7b2ff7;
+      margin-right: 10px;
+      cursor: pointer;
+    }
+
+    .range-val {
+      color: #aaa;
+      font-size: 0.8rem;
+      min-width: 34px;
+      text-align: right;
+      font-family: monospace;
+    }
+
+    .keybind-btn {
+      padding: 6px 0;
+      width: 110px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px;
+      color: #fff;
+      font-family: monospace;
+      font-size: 0.85rem;
+      cursor: pointer;
+      text-align: center;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .keybind-btn:hover {
+      background: rgba(123,47,247,0.2);
+      border-color: #7b2ff7;
+    }
+
+    .keybind-btn.listening {
+      background: rgba(123,47,247,0.3);
+      border-color: #7b2ff7;
+      color: #c8a0ff;
+      animation: kbpulse 0.9s ease-in-out infinite;
+    }
+
+    @keyframes kbpulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.55; }
+    }
+
+    .settings-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 26px;
+      justify-content: flex-end;
+    }
+
+    .settings-actions button {
+      padding: 9px 22px;
+      border-radius: 7px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+
+    .settings-actions button:hover { opacity: 0.83; }
+
+    .btn-reset {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.18);
+      color: #aaa;
+    }
+
+    .btn-apply {
+      background: linear-gradient(135deg, #7b2ff7, #00d2ff);
+      border: none;
+      color: #fff;
+      font-weight: 600;
     }
   </style>
 </head>
@@ -369,8 +619,55 @@
       </div>
       <div id="crosshair"></div>
       <div id="coords">X: 0 Y: 0 Z: 0</div>
+      <div id="stamina-container">
+        <div id="stamina-label">Stamina</div>
+        <div id="stamina-bar-bg">
+          <div id="stamina-bar"></div>
+        </div>
+      </div>
+      <div id="crouch-indicator">Crouching</div>
       <div id="player-names"></div>
-      <div id="lock-prompt" style="display:none;">Click to play</div>
+      <div id="lock-prompt" style="display:none;">Click to play &mdash; Esc to pause</div>
+    </div>
+
+    <!-- Pause Menu -->
+    <div id="pause-menu">
+      <div class="pause-panel">
+        <div class="pause-title">Game Menu</div>
+        <button class="pause-btn primary" id="pause-resume">Back to Game</button>
+        <button class="pause-btn" id="pause-settings">Settings&hellip;</button>
+        <div class="pause-divider"></div>
+        <button class="pause-btn" id="pause-lobby">Leave World</button>
+        <button class="pause-btn danger" id="pause-logout">Logout</button>
+      </div>
+    </div>
+
+    <!-- Settings Menu -->
+    <div id="settings-menu">
+      <div class="settings-panel">
+        <h2>Settings</h2>
+
+        <div class="settings-section-title">Mouse</div>
+        <div class="settings-row">
+          <label>Sensitivity</label>
+          <input type="range" id="sens-slider" min="0.0002" max="0.004" step="0.0001">
+          <span class="range-val" id="sens-val">1.0</span>
+        </div>
+
+        <div class="settings-section-title">Keybinds</div>
+        <div class="settings-row"><label>Forward</label>  <button class="keybind-btn" data-action="forward"></button></div>
+        <div class="settings-row"><label>Backward</label> <button class="keybind-btn" data-action="backward"></button></div>
+        <div class="settings-row"><label>Left</label>     <button class="keybind-btn" data-action="left"></button></div>
+        <div class="settings-row"><label>Right</label>    <button class="keybind-btn" data-action="right"></button></div>
+        <div class="settings-row"><label>Jump</label>     <button class="keybind-btn" data-action="jump"></button></div>
+        <div class="settings-row"><label>Run</label>      <button class="keybind-btn" data-action="run"></button></div>
+        <div class="settings-row"><label>Crouch</label>   <button class="keybind-btn" data-action="crouch"></button></div>
+
+        <div class="settings-actions">
+          <button class="btn-reset" id="settings-reset">Reset Defaults</button>
+          <button class="btn-apply" id="settings-close">Apply &amp; Close</button>
+        </div>
+      </div>
     </div>
   </div>
 

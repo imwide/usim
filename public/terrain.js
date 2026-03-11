@@ -71,8 +71,14 @@ class TerrainManager {
           // Deep water blue
           colors[idx] = 0.1; colors[idx+1] = 0.3; colors[idx+2] = 0.6;
         } else if (t < 0.4) {
-          // Sand
-          colors[idx] = 0.76; colors[idx+1] = 0.7; colors[idx+2] = 0.5;
+          // Sand - slightly darker with subtle dune variation so it keeps contrast at noon
+          const shoreline = (t - 0.3) / 0.1;
+          const wetness = 1 - shoreline;
+          const duneNoise = this.noise.perlin2(wx * 0.025, wz * 0.025) * 0.5 + 0.5;
+          const brightness = 0.88 + duneNoise * 0.10 - wetness * 0.08;
+          colors[idx] = 0.68 * brightness;
+          colors[idx+1] = 0.62 * brightness;
+          colors[idx+2] = 0.42 * brightness;
         } else if (t < 0.7) {
           // Grass green
           const g = 0.3 + (t - 0.4) * 0.5;

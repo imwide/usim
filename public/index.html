@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>USIM</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* Auth Screen */
+    #auth-screen {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      background: linear-gradient(135deg, #0a0a1a 0%, #1a1a2e 50%, #16213e 100%);
+    }
+
+    .auth-container {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px;
+      padding: 40px;
+      width: 380px;
+      backdrop-filter: blur(20px);
+    }
+
+    .auth-container h1 {
+      text-align: center;
+      font-size: 2.5rem;
+      margin-bottom: 8px;
+      background: linear-gradient(135deg, #00d2ff, #7b2ff7);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      font-weight: 800;
+      letter-spacing: 4px;
+    }
+
+    .auth-container .subtitle {
+      text-align: center;
+      color: #888;
+      margin-bottom: 30px;
+      font-size: 0.85rem;
+    }
+
+    .auth-tabs {
+      display: flex;
+      margin-bottom: 24px;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .auth-tab {
+      flex: 1;
+      padding: 10px;
+      text-align: center;
+      cursor: pointer;
+      background: transparent;
+      border: none;
+      color: #888;
+      font-size: 0.9rem;
+      transition: all 0.2s;
+    }
+
+    .auth-tab.active {
+      background: rgba(123, 47, 247, 0.3);
+      color: #fff;
+    }
+
+    .auth-form input {
+      width: 100%;
+      padding: 12px 16px;
+      margin-bottom: 14px;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.05);
+      color: #fff;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .auth-form input:focus {
+      border-color: #7b2ff7;
+    }
+
+    .auth-form button {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #7b2ff7, #00d2ff);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+
+    .auth-form button:hover { opacity: 0.9; }
+
+    .auth-error {
+      color: #ff6b6b;
+      text-align: center;
+      margin-bottom: 12px;
+      font-size: 0.85rem;
+      min-height: 20px;
+    }
+
+    /* Lobby Screen */
+    #lobby-screen {
+      display: none;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      background: linear-gradient(135deg, #0a0a1a 0%, #1a1a2e 50%, #16213e 100%);
+    }
+
+    .lobby-container {
+      text-align: center;
+    }
+
+    .lobby-container h2 {
+      font-size: 1.5rem;
+      margin-bottom: 8px;
+    }
+
+    .lobby-container .welcome {
+      color: #888;
+      margin-bottom: 40px;
+    }
+
+    .character-preview {
+      width: 200px;
+      height: 280px;
+      margin: 0 auto 30px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .character-preview canvas {
+      border-radius: 12px;
+    }
+
+    .character-label {
+      color: #aaa;
+      margin-bottom: 24px;
+      font-size: 0.9rem;
+    }
+
+    .play-btn {
+      padding: 14px 48px;
+      border: none;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #7b2ff7, #00d2ff);
+      color: #fff;
+      font-size: 1.1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, opacity 0.2s;
+      margin-bottom: 16px;
+    }
+
+    .play-btn:hover { transform: scale(1.05); }
+
+    .logout-btn {
+      padding: 8px 24px;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
+      background: transparent;
+      color: #aaa;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: color 0.2s;
+    }
+
+    .logout-btn:hover { color: #fff; }
+
+    /* Game Screen */
+    #game-screen {
+      display: none;
+      width: 100vw;
+      height: 100vh;
+      position: relative;
+    }
+
+    #game-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* HUD */
+    #hud {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    #hud-top {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      pointer-events: auto;
+    }
+
+    #player-count {
+      background: rgba(0,0,0,0.5);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      color: #aaa;
+    }
+
+    #hud-logout {
+      background: rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
+      padding: 6px 14px;
+      color: #aaa;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+
+    #hud-logout:hover { color: #fff; }
+
+    #crosshair {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 20px;
+      height: 20px;
+    }
+
+    #crosshair::before, #crosshair::after {
+      content: '';
+      position: absolute;
+      background: rgba(255,255,255,0.5);
+    }
+
+    #crosshair::before {
+      width: 2px;
+      height: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    #crosshair::after {
+      width: 20px;
+      height: 2px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    #coords {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      background: rgba(0,0,0,0.5);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      color: #aaa;
+      font-family: monospace;
+    }
+
+    #player-names {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .player-label {
+      position: absolute;
+      color: #fff;
+      font-size: 12px;
+      background: rgba(0,0,0,0.6);
+      padding: 2px 8px;
+      border-radius: 4px;
+      transform: translate(-50%, -100%);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    #lock-prompt {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.7);
+      padding: 20px 32px;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 1rem;
+      text-align: center;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Auth Screen -->
+  <div id="auth-screen">
+    <div class="auth-container">
+      <h1>USIM</h1>
+      <p class="subtitle">Open World Multiplayer</p>
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Login</button>
+        <button class="auth-tab" data-tab="register">Register</button>
+      </div>
+      <div class="auth-error" id="auth-error"></div>
+      <form class="auth-form" id="auth-form">
+        <input type="text" id="username" placeholder="Username" autocomplete="username" required>
+        <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit" id="auth-submit">Login</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Lobby Screen -->
+  <div id="lobby-screen">
+    <div class="lobby-container">
+      <h2>Select Character</h2>
+      <p class="welcome">Welcome, <span id="lobby-username"></span></p>
+      <div class="character-preview">
+        <canvas id="character-canvas" width="200" height="280"></canvas>
+      </div>
+      <p class="character-label">Default Character</p>
+      <button class="play-btn" id="play-btn">Enter World</button>
+      <br>
+      <button class="logout-btn" id="lobby-logout">Logout</button>
+    </div>
+  </div>
+
+  <!-- Game Screen -->
+  <div id="game-screen">
+    <canvas id="game-canvas"></canvas>
+    <div id="hud">
+      <div id="hud-top">
+        <div id="player-count">Players: 1</div>
+        <button id="hud-logout">Leave</button>
+      </div>
+      <div id="crosshair"></div>
+      <div id="coords">X: 0 Y: 0 Z: 0</div>
+      <div id="player-names"></div>
+      <div id="lock-prompt" style="display:none;">Click to play</div>
+    </div>
+  </div>
+
+  <!-- Dependencies -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+
+  <!-- Game Scripts -->
+  <script src="noise.js"></script>
+  <script src="terrain.js"></script>
+  <script src="game.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

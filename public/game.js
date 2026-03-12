@@ -12,6 +12,7 @@ class Game {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setClearColor(0x87CEEB); // sky blue
+    this.renderer.outputEncoding = THREE.sRGBEncoding;
     this.renderer.shadowMap.enabled = false; // disable for performance
 
     // Camera
@@ -21,9 +22,10 @@ class Game {
     // Fog for distance fade
     this.scene.fog = new THREE.FogExp2(0x87CEEB, 0.0025);
 
-    // Day / night cycle
-    this.dayTime = 0.27;   // 0 = midnight, 0.5 = noon
-    this.daySpeed = 1 / 180; // full cycle in 3 real minutes
+    // Day / night cycle - controlled by server
+    this.dayTime = 0.27;   // 0 = midnight, 0.5 = noon (used as fallback)
+    this.gameWorldStartTime = null; // Will be set by server
+    this.timeCycleMs = 2 * 60 * 60 * 1000; // 2 real hours = 1 full day cycle
 
     // Sky, sun, moon, stars, lights
     this.setupSky();
@@ -33,7 +35,7 @@ class Game {
     this.terrain = new TerrainManager(this.scene, this.noise);
 
     // Water
-    this.waterLevel = -15.5;
+    this.waterLevel = 0;
     this.terrain.setWaterLevel(this.waterLevel);
     this.waterTime = 0;
     this.waterBaseFogDensity = 0.0025;
@@ -47,7 +49,7 @@ class Game {
     this.position = new THREE.Vector3(0, 60, 0);
     this.velocity = new THREE.Vector3(0, 0, 0);
     this.euler = new THREE.Euler(0, 0, 0, 'YXZ');
-    this.moveSpeed = 15;
+    this.moveSpeed = 4;
     this.gravity = -50;
     this.jumpSpeed = 15;
     this.onGround = false;
@@ -63,9 +65,11 @@ class Game {
     this.staminaDrainRate = 1.2;
     this.staminaRegenRate = 0.5;
     this.staminaRecoveryThreshold = 2.0; // must regen to this before running again
-    this.runSpeedMultiplier = 1.5;
+    this.runSpeedMultiplier = 2.0;
     this.crouchCameraOffset = 0;       // current camera height offset (lerped)
-    this.crouchSpeedMultiplier = 0.65;
+    this.crouchSpeedMultiplier = 0.4;
+    this.jumpAnimationTimer = 0;
+    this.jumpAnimationDuration = 0.7;
 
     // Settings (loaded from localStorage)
     this.settings = Game.loadSettings();
@@ -76,6 +80,43 @@ class Game {
     this.paused = false;
     this.mouseSensitivity = this.settings.sensitivity;
 
+    // Phone item / UI
+    this.hasPhone = true;
+    this.phoneOpen = false;
+    this.phoneDocked = false;
+    this.phoneActiveApp = null;
+    this.phoneUI = null;
+    this.phoneClockLabel = '';
+    this.phoneMap = {
+      zoomIndex: 11,
+      followPlayer: true,
+      centerX: this.position.x,
+      centerZ: this.position.z,
+      canvas: null,
+      ctx: null,
+      rangeLabel: null,
+      detailLabel: null,
+      coordsLabel: null,
+      followBtn: null,
+      zoomInBtn: null,
+      zoomOutBtn: null,
+      dragging: false,
+      dragMoved: false,
+      pointerId: null,
+      dragStartX: 0,
+      dragStartY: 0,
+      dragCenterX: 0,
+      dragCenterZ: 0,
+      dirty: true,
+      lastRenderTime: 0,
+      lastRenderPlayerX: this.position.x,
+      lastRenderPlayerZ: this.position.z,
+      lastRenderHeading: this.euler.y,
+    };
+    this.phoneMapLightDir = new THREE.Vector3(-0.58, 0.72, 0.38).normalize();
+
+    this.setupPhoneUI();
+
     // Multiplayer
     this.socket = null;
     this.otherPlayers = {};
@@ -85,6 +126,341 @@ class Game {
 
     // Resize
     window.addEventListener('resize', () => this.onResize());
+  }
+
+  static get CHARACTER_MODEL_URL() {
+    return '/assets/character.glb';
+  }
+
+  static get CHARACTER_TARGET_HEIGHT() {
+    return 0.00700;
+  }
+
+  static get CHARACTER_ROTATION_OFFSET() {
+    return Math.PI;
+  }
+
+  static get PHONE_APPS() {
+    return {
+      messages: {
+        title: 'Messages',
+        subtitle: 'Inbox synced',
+        body: `
+          <div class="phone-card">
+            <div class="phone-card-title">Recent Messages</div>
+            <div class="phone-list-item">
+              <strong>Dispatch</strong>
+              <span>No new alerts in your area.</span>
+            </div>
+            <div class="phone-list-item">
+              <strong>Contacts</strong>
+              <span>Your chat list is empty for now.</span>
+            </div>
+            <div class="phone-list-item">
+              <strong>System</strong>
+              <span>Placeholder messaging app ready.</span>
+            </div>
+          </div>
+        `,
+      },
+      maps: {
+        title: 'Maps',
+        subtitle: 'Multi-layer terrain scan',
+        body: '',
+      },
+      calls: {
+        title: 'Calls',
+        subtitle: 'Signal available',
+        body: `
+          <div class="phone-card">
+            <div class="phone-card-title">Quick Dial</div>
+            <div class="phone-call-pill">Emergency Services</div>
+            <div class="phone-call-pill">Mechanic</div>
+            <div class="phone-call-pill">Taxi</div>
+            <p>Voice calling is a placeholder for now.</p>
+          </div>
+        `,
+      },
+      shop: {
+        title: 'Shop',
+        subtitle: 'Storefront preview',
+        body: `
+          <div class="phone-card">
+            <div class="phone-card-title">Featured Items</div>
+            <div class="phone-shop-row"><span>Starter Snacks</span><strong>$4</strong></div>
+            <div class="phone-shop-row"><span>Roadside Toolkit</span><strong>$18</strong></div>
+            <div class="phone-shop-row"><span>Fuel Voucher</span><strong>$25</strong></div>
+            <p>Purchasing is disabled until the real economy exists.</p>
+          </div>
+        `,
+      },
+    };
+  }
+
+  static formatKeyLabel(code) {
+    if (!code) return 'Unbound';
+
+    const map = {
+      Space: 'Space',
+      ShiftLeft: 'L.Shift',
+      ShiftRight: 'R.Shift',
+      ControlLeft: 'L.Ctrl',
+      ControlRight: 'R.Ctrl',
+      AltLeft: 'L.Alt',
+      AltRight: 'R.Alt',
+      ArrowUp: '↑',
+      ArrowDown: '↓',
+      ArrowLeft: '←',
+      ArrowRight: '→',
+    };
+
+    if (map[code]) return map[code];
+    if (code.startsWith('Key')) return code.slice(3);
+    if (code.startsWith('Digit')) return code.slice(5);
+    if (code.startsWith('Numpad')) return 'Num' + code.slice(6);
+    return code;
+  }
+
+  static get MAP_ZOOM_LEVELS() {
+    return [
+      { label: '180 m', halfSpan: 90 },
+      { label: '360 m', halfSpan: 180 },
+      { label: '720 m', halfSpan: 360 },
+      { label: '1.4 km', halfSpan: 720 },
+      { label: '2.9 km', halfSpan: 1440 },
+      { label: '5.8 km', halfSpan: 2880 },
+      { label: '11.5 km', halfSpan: 5760 },
+      { label: '23.0 km', halfSpan: 11520 },
+      { label: '46.1 km', halfSpan: 23040 },
+      { label: '92.2 km', halfSpan: 46080 },
+      { label: '184.3 km', halfSpan: 92160 },
+      { label: '368.6 km', halfSpan: 184320 },
+      { label: '737.3 km', halfSpan: 368640 },
+    ];
+  }
+
+  static preloadCharacterAsset() {
+    if (Game._characterAssetPromise) return Game._characterAssetPromise;
+
+    Game._characterAssetPromise = new Promise((resolve, reject) => {
+      if (!THREE.GLTFLoader) {
+        reject(new Error('THREE.GLTFLoader is not available'));
+        return;
+      }
+
+      const loader = new THREE.GLTFLoader();
+      loader.load(
+        Game.CHARACTER_MODEL_URL,
+        (gltf) => {
+          try {
+            const scene = Game.normalizeCharacterScene(gltf.scene);
+            const animations = Array.isArray(gltf.animations) ? gltf.animations.slice() : [];
+            const asset = {
+              scene,
+              animations,
+              animationMap: Game.mapCharacterAnimations(animations),
+              height: scene.userData.characterHeight || Game.CHARACTER_TARGET_HEIGHT,
+              labelHeight: scene.userData.labelHeight || (Game.CHARACTER_TARGET_HEIGHT + 0.35),
+            };
+            Game._characterAsset = asset;
+            resolve(asset);
+          } catch (error) {
+            reject(error);
+          }
+        },
+        undefined,
+        (error) => {
+          reject(error);
+        }
+      );
+    }).catch((error) => {
+      console.error('Failed to load character model:', error);
+      Game._characterAssetPromise = null;
+      throw error;
+    });
+
+    return Game._characterAssetPromise;
+  }
+
+  static normalizeCharacterScene(scene) {
+    scene.rotation.y += Game.CHARACTER_ROTATION_OFFSET;
+
+    scene.traverse((child) => {
+      if (child.isMesh || child.isSkinnedMesh) {
+        child.frustumCulled = false;
+      }
+    });
+
+    scene.updateMatrixWorld(true);
+
+    let bounds = new THREE.Box3().setFromObject(scene);
+    const initialSize = bounds.getSize(new THREE.Vector3());
+    const height = Math.max(initialSize.y, 0.001);
+    const scale = Game.CHARACTER_TARGET_HEIGHT / height;
+    scene.scale.multiplyScalar(scale);
+    scene.updateMatrixWorld(true);
+
+    bounds = new THREE.Box3().setFromObject(scene);
+    const center = bounds.getCenter(new THREE.Vector3());
+    scene.position.x -= center.x;
+    scene.position.y -= bounds.min.y;
+    scene.position.z -= center.z;
+    scene.updateMatrixWorld(true);
+
+    bounds = new THREE.Box3().setFromObject(scene);
+    const finalSize = bounds.getSize(new THREE.Vector3());
+    scene.userData.characterHeight = finalSize.y;
+    scene.userData.labelHeight = finalSize.y + 0.35;
+
+    return scene;
+  }
+
+  static mapCharacterAnimations(animations) {
+    const animationMap = {
+      idle: Game.findCharacterClip(animations, ['idle', 'breathing', 'stand']),
+      walk: Game.findCharacterClip(animations, ['walk', 'strafe']),
+      run: Game.findCharacterClip(animations, ['run', 'jog', 'sprint']),
+      jump: Game.findCharacterClip(animations, ['jump', 'fall', 'land']),
+      crouch: Game.findCharacterClip(animations, ['crouch', 'sneak']),
+      swim: Game.findCharacterClip(animations, ['swim']),
+    };
+
+    if (!animationMap.idle && Array.isArray(animations) && animations[0]) {
+      animationMap.idle = animations[0];
+    }
+
+    return animationMap;
+  }
+
+  static findCharacterClip(animations, keywords) {
+    if (!Array.isArray(animations) || animations.length === 0) return null;
+
+    const searchable = animations.map((clip) => ({
+      clip,
+      name: String(clip.name || '').toLowerCase(),
+    }));
+
+    for (const keyword of keywords) {
+      const match = searchable.find(({ name }) => name.includes(keyword));
+      if (match) return match.clip;
+    }
+
+    return null;
+  }
+
+  static async createCharacterInstance() {
+    const asset = await Game.preloadCharacterAsset();
+    if (!THREE.SkeletonUtils || typeof THREE.SkeletonUtils.clone !== 'function') {
+      throw new Error('THREE.SkeletonUtils is not available');
+    }
+
+    const model = THREE.SkeletonUtils.clone(asset.scene);
+    model.userData.characterHeight = asset.height;
+    model.userData.labelHeight = asset.labelHeight;
+
+    const mixer = asset.animations.length ? new THREE.AnimationMixer(model) : null;
+    const actions = {};
+    if (mixer) {
+      for (const [state, clip] of Object.entries(asset.animationMap)) {
+        if (!clip || actions[state]) continue;
+        const action = mixer.clipAction(clip);
+        action.enabled = true;
+        if (state === 'jump') {
+          action.clampWhenFinished = true;
+          action.setLoop(THREE.LoopOnce, 1);
+        } else {
+          action.clampWhenFinished = false;
+          action.setLoop(THREE.LoopRepeat, Infinity);
+        }
+        actions[state] = action;
+      }
+    }
+
+    return {
+      model,
+      mixer,
+      actions,
+      height: asset.height,
+      labelHeight: asset.labelHeight,
+    };
+  }
+
+  static createPlaceholderCharacterModel(color = 0x2299ff) {
+    const group = new THREE.Group();
+
+    const torsoMat = new THREE.MeshLambertMaterial({ color });
+    const skinMat = new THREE.MeshLambertMaterial({ color: 0xffcc99 });
+    const legMat = new THREE.MeshLambertMaterial({ color: 0x333366 });
+    const hairMat = new THREE.MeshLambertMaterial({ color: 0x2b1b14 });
+
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.95, 1.35, 0.48), torsoMat);
+    torso.position.y = 1.82;
+    group.add(torso);
+
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.72, 0.72), skinMat);
+    head.position.y = 2.93;
+    group.add(head);
+
+    const hair = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.2, 0.8), hairMat);
+    hair.position.y = 3.25;
+    group.add(hair);
+
+    const armGeo = new THREE.BoxGeometry(0.26, 1.05, 0.26);
+    const leftArm = new THREE.Mesh(armGeo, torsoMat);
+    leftArm.position.set(-0.68, 1.85, 0);
+    group.add(leftArm);
+    const rightArm = new THREE.Mesh(armGeo, torsoMat);
+    rightArm.position.set(0.68, 1.85, 0);
+    group.add(rightArm);
+
+    const legGeo = new THREE.BoxGeometry(0.32, 1.05, 0.32);
+    const leftLeg = new THREE.Mesh(legGeo, legMat);
+    leftLeg.position.set(-0.22, 0.52, 0);
+    group.add(leftLeg);
+    const rightLeg = new THREE.Mesh(legGeo, legMat);
+    rightLeg.position.set(0.22, 0.52, 0);
+    group.add(rightLeg);
+
+    group.userData.disposeOnRemove = true;
+    group.userData.characterHeight = 3.35;
+    group.userData.labelHeight = 3.7;
+
+    return group;
+  }
+
+  static playCharacterAnimation(target, state, fadeDuration = 0.2) {
+    if (!target || !target.actions) return;
+
+    const fallbacks = [state];
+    if (state === 'run') fallbacks.push('walk');
+    fallbacks.push('idle');
+
+    let nextAction = null;
+    for (const key of fallbacks) {
+      if (target.actions[key]) {
+        nextAction = target.actions[key];
+        break;
+      }
+    }
+
+    if (!nextAction) {
+      nextAction = Object.values(target.actions)[0] || null;
+    }
+    if (!nextAction || target.currentAction === nextAction) return;
+
+    const previousAction = target.currentAction;
+    target.currentAction = nextAction;
+
+    nextAction
+      .reset()
+      .setEffectiveTimeScale(1)
+      .setEffectiveWeight(1)
+      .fadeIn(fadeDuration)
+      .play();
+
+    if (previousAction && previousAction !== nextAction) {
+      previousAction.fadeOut(fadeDuration);
+    }
   }
 
   setupSky() {
@@ -385,7 +761,11 @@ class Game {
   }
 
   updateSky(dt) {
-    this.dayTime = (this.dayTime + dt * this.daySpeed) % 1.0;
+    // Calculate day time based on server's world start time
+    if (this.gameWorldStartTime !== null) {
+      const elapsedMs = Date.now() - this.gameWorldStartTime;
+      this.dayTime = (elapsedMs / this.timeCycleMs) % 1.0;
+    }
     const t = this.dayTime;
 
     // Sun orbit: 0=midnight (below), 0.5=noon (above)
@@ -724,43 +1104,7 @@ class Game {
   }
 
   createPlayerModel(color = 0x2299ff) {
-    const group = new THREE.Group();
-
-    // Body
-    const bodyGeo = new THREE.BoxGeometry(1.2, 1.8, 0.8);
-    const bodyMat = new THREE.MeshLambertMaterial({ color: color });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.position.y = 0.9;
-    group.add(body);
-
-    // Head
-    const headGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
-    const headMat = new THREE.MeshLambertMaterial({ color: 0xffcc99 });
-    const head = new THREE.Mesh(headGeo, headMat);
-    head.position.y = 2.2;
-    group.add(head);
-
-    // Arms
-    const armGeo = new THREE.BoxGeometry(0.35, 1.4, 0.35);
-    const armMat = new THREE.MeshLambertMaterial({ color: color });
-    const leftArm = new THREE.Mesh(armGeo, armMat);
-    leftArm.position.set(-0.95, 1.0, 0);
-    group.add(leftArm);
-    const rightArm = new THREE.Mesh(armGeo, armMat);
-    rightArm.position.set(0.95, 1.0, 0);
-    group.add(rightArm);
-
-    // Legs
-    const legGeo = new THREE.BoxGeometry(0.4, 1.2, 0.4);
-    const legMat = new THREE.MeshLambertMaterial({ color: 0x333366 });
-    const leftLeg = new THREE.Mesh(legGeo, legMat);
-    leftLeg.position.set(-0.3, -0.6, 0);
-    group.add(leftLeg);
-    const rightLeg = new THREE.Mesh(legGeo, legMat);
-    rightLeg.position.set(0.3, -0.6, 0);
-    group.add(rightLeg);
-
-    return group;
+    return Game.createPlaceholderCharacterModel(color);
   }
 
   createNameLabel(text) {
@@ -773,6 +1117,7 @@ class Game {
 
   start(username, token) {
     this.username = username;
+    Game.preloadCharacterAsset().catch(() => {});
 
     // Setup input
     this.setupInput();
@@ -794,6 +1139,7 @@ class Game {
 
   stop() {
     this.running = false;
+    this.setPhoneOpen(false, { skipPointerLock: true, immediate: true });
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
@@ -801,9 +1147,9 @@ class Game {
 
     // Clean up other player labels
     for (const id in this.otherPlayers) {
-      if (this.otherPlayers[id].label) {
-        this.otherPlayers[id].label.remove();
-      }
+      const player = this.otherPlayers[id];
+      if (player.model) this.scene.remove(player.model);
+      if (player.label) player.label.remove();
     }
     this.otherPlayers = {};
 
@@ -812,25 +1158,51 @@ class Game {
     document.removeEventListener('keyup', this._onKeyUp);
     document.removeEventListener('mousemove', this._onMouseMove);
     document.removeEventListener('pointerlockchange', this._onPointerLockChange);
+    if (this._onCanvasClick) this.canvas.removeEventListener('click', this._onCanvasClick);
     document.exitPointerLock();
   }
 
   setupInput() {
     this._onKeyDown = (e) => {
+      const kb = this.settings.keybinds;
+      const phoneKey = kb.phone;
+
       // Escape toggles pause (only works when NOT pointer-locked; browser
       // intercepts Escape to kill pointer lock before keydown fires, so the
       // real pause trigger is pointerlockchange below).
       if (e.code === 'Escape') {
         e.preventDefault();
+        if (this.phoneOpen || this.phoneDocked) {
+          this.setPhoneOpen(false);
+          return;
+        }
         if (this.paused) this.togglePause(); // resume if already paused
         return;
       }
       if (this.paused) return;
+
+      // Prevent default browser behavior for game control keys
+      const gameKeys = [kb.forward, kb.backward, kb.left, kb.right, kb.jump, kb.run, kb.crouch, phoneKey].filter(Boolean);
+      if (gameKeys.includes(e.code)) {
+        e.preventDefault();
+      }
+
+      if (phoneKey && e.code === phoneKey) {
+        if (this.phoneDocked) {
+          this.setPhoneOpen(true);
+        } else {
+          this.setPhoneOpen(!this.phoneOpen);
+        }
+        return;
+      }
+
+      if (this.phoneOpen) return;
+
       this.keys[e.code] = true;
-      const kb = this.settings.keybinds;
       if (e.code === kb.jump && this.onGround && !this.isSwimming) {
         this.velocity.y = this.jumpSpeed;
         this.onGround = false;
+        this.jumpAnimationTimer = this.jumpAnimationDuration;
       }
     };
     this._onKeyUp = (e) => {
@@ -851,9 +1223,10 @@ class Game {
     document.addEventListener('mousemove', this._onMouseMove);
 
     // Click canvas to (re)acquire pointer lock when not paused
-    this.canvas.addEventListener('click', () => {
-      if (!this.paused) this.canvas.requestPointerLock();
-    });
+    this._onCanvasClick = () => {
+      if (!this.paused && !this.phoneOpen) this.canvas.requestPointerLock();
+    };
+    this.canvas.addEventListener('click', this._onCanvasClick);
 
     // Primary pause trigger: browser kills pointer lock with Escape BEFORE
     // keydown fires, so we detect the lock loss here instead.
@@ -864,6 +1237,12 @@ class Game {
         // Lock acquired — hide the "click to play" prompt
         prompt.style.display = 'none';
       } else if (!this.paused && this.running) {
+        if (this.phoneOpen) return;
+        if (this.phoneDocked) {
+          this.setPhoneOpen(false, { skipPointerLock: true, immediate: true });
+          prompt.style.display = 'block';
+          return;
+        }
         // Lock lost (user pressed Escape) — pause the game
         this.togglePause();
       }
@@ -875,6 +1254,10 @@ class Game {
   }
 
   togglePause() {
+    if (this.phoneOpen || this.phoneDocked) {
+      this.setPhoneOpen(false, { skipPointerLock: true, immediate: true });
+    }
+
     this.paused = !this.paused;
     const menu   = document.getElementById('pause-menu');
     const hud    = document.getElementById('hud');
@@ -905,6 +1288,7 @@ class Game {
     this.settings = settings;
     this.mouseSensitivity = settings.sensitivity;
     Game.saveSettings(settings);
+    this.updatePhoneKeyHint();
   }
 
   static defaultSettings() {
@@ -918,6 +1302,7 @@ class Game {
         jump:     'Space',
         run:      'ControlLeft',
         crouch:   'ShiftLeft',
+        phone:    'KeyP',
       },
     };
   }
@@ -942,6 +1327,627 @@ class Game {
     localStorage.setItem('usim_settings', JSON.stringify(settings));
   }
 
+  setupPhoneUI() {
+    const root = document.getElementById('phone-root');
+    if (!root) return;
+
+    this.phoneUI = {
+      root,
+      clock: document.getElementById('phone-time'),
+      keyHint: document.getElementById('phone-keybind-hint'),
+      dockBtn: document.getElementById('phone-dock'),
+      home: document.getElementById('phone-home'),
+      appView: document.getElementById('phone-app-view'),
+      appTitle: document.getElementById('phone-app-title'),
+      appSubtitle: document.getElementById('phone-app-subtitle'),
+      appBody: document.getElementById('phone-app-body'),
+      closeBtn: document.getElementById('phone-close'),
+      backBtn: document.getElementById('phone-back'),
+      homeBtn: document.getElementById('phone-home-btn'),
+      apps: Array.from(document.querySelectorAll('.phone-app')),
+    };
+
+    this.phoneUI.apps.forEach((button) => {
+      button.onclick = () => this.openPhoneApp(button.dataset.app);
+    });
+
+    if (this.phoneUI.closeBtn) {
+      this.phoneUI.closeBtn.onclick = () => this.setPhoneOpen(false);
+    }
+    if (this.phoneUI.dockBtn) {
+      this.phoneUI.dockBtn.onclick = () => this.setPhoneOpen('docked');
+    }
+    if (this.phoneUI.backBtn) {
+      this.phoneUI.backBtn.onclick = () => this.openPhoneApp(null);
+    }
+    if (this.phoneUI.homeBtn) {
+      this.phoneUI.homeBtn.onclick = () => this.openPhoneApp(null);
+    }
+
+    this.openPhoneApp(null);
+    this.updatePhoneClock(true);
+    this.updatePhoneKeyHint();
+    this.syncPhoneUI(true);
+  }
+
+  updatePhoneKeyHint() {
+    if (!this.phoneUI || !this.phoneUI.keyHint) return;
+    this.phoneUI.keyHint.textContent = Game.formatKeyLabel(this.settings.keybinds.phone);
+  }
+
+  updatePhoneClock(force = false) {
+    if (!this.phoneUI || !this.phoneUI.clock) return;
+
+    const clockText = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+    if (!force && clockText === this.phoneClockLabel) return;
+    this.phoneClockLabel = clockText;
+    this.phoneUI.clock.textContent = clockText;
+  }
+
+  openPhoneApp(appId) {
+    if (!this.phoneUI) return;
+
+    if (this.phoneMap) {
+      this.phoneMap.dragging = false;
+      this.phoneMap.pointerId = null;
+    }
+
+    this.phoneActiveApp = appId || null;
+    const isHome = !this.phoneActiveApp;
+    this.phoneUI.home.style.display = isHome ? 'flex' : 'none';
+    this.phoneUI.appView.style.display = isHome ? 'none' : 'flex';
+
+    if (isHome) return;
+
+    const app = Game.PHONE_APPS[this.phoneActiveApp] || Game.PHONE_APPS.messages;
+    this.phoneUI.appTitle.textContent = app.title;
+    this.phoneUI.appSubtitle.textContent = app.subtitle;
+
+    if (this.phoneActiveApp === 'maps') {
+      this.phoneUI.appBody.innerHTML = this.getPhoneMapMarkup();
+      this.setupPhoneMapApp();
+      this.markPhoneMapDirty();
+      this.renderPhoneMap(true);
+      return;
+    }
+
+    this.phoneUI.appBody.innerHTML = app.body;
+  }
+
+  getPhoneMapMarkup() {
+    return `
+      <div class="phone-map-panel">
+        <div class="phone-map-toolbar">
+          <div class="phone-map-toolbar-meta">
+            <div id="phone-map-range" class="phone-map-range">Range</div>
+            <div id="phone-map-detail" class="phone-map-detail">Loading map…</div>
+          </div>
+          <div class="phone-map-toolbar-actions">
+            <button id="phone-map-follow" class="phone-map-tool-btn follow" type="button">Following</button>
+            <button id="phone-map-zoom-out" class="phone-map-tool-btn" type="button" aria-label="Zoom out">−</button>
+            <button id="phone-map-zoom-in" class="phone-map-tool-btn" type="button" aria-label="Zoom in">+</button>
+          </div>
+        </div>
+
+        <div class="phone-map-canvas-wrap">
+          <canvas id="phone-map-canvas"></canvas>
+          <div class="phone-map-compass">N</div>
+        </div>
+
+        <div class="phone-map-readout">
+          <div id="phone-map-coords" class="phone-map-coords">X 0 • Z 0 • Alt 0</div>
+          <div class="phone-map-legend">
+            <span class="phone-map-legend-item"><span class="phone-map-swatch water"></span>Water</span>
+            <span class="phone-map-legend-item"><span class="phone-map-swatch road"></span>Roads</span>
+            <span class="phone-map-legend-item"><span class="phone-map-swatch player"></span>You</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  setupPhoneMapApp() {
+    const map = this.phoneMap;
+    if (!map || !this.phoneUI) return;
+
+    map.canvas = document.getElementById('phone-map-canvas');
+    map.ctx = map.canvas ? map.canvas.getContext('2d', { alpha: false }) : null;
+    map.rangeLabel = document.getElementById('phone-map-range');
+    map.detailLabel = document.getElementById('phone-map-detail');
+    map.coordsLabel = document.getElementById('phone-map-coords');
+    map.followBtn = document.getElementById('phone-map-follow');
+    map.zoomInBtn = document.getElementById('phone-map-zoom-in');
+    map.zoomOutBtn = document.getElementById('phone-map-zoom-out');
+
+    if (!map.canvas || !map.ctx) return;
+
+    map.canvas.onwheel = (event) => {
+      event.preventDefault();
+      this.zoomPhoneMap(event.deltaY < 0 ? 1 : -1);
+    };
+
+    map.canvas.onpointerdown = (event) => {
+      event.preventDefault();
+      map.dragging = true;
+      map.dragMoved = false;
+      map.pointerId = event.pointerId;
+      map.dragStartX = event.clientX;
+      map.dragStartY = event.clientY;
+      map.dragCenterX = map.followPlayer ? this.position.x : map.centerX;
+      map.dragCenterZ = map.followPlayer ? this.position.z : map.centerZ;
+      if (map.canvas.setPointerCapture) {
+        map.canvas.setPointerCapture(event.pointerId);
+      }
+    };
+
+    map.canvas.onpointermove = (event) => {
+      if (!map.dragging || map.pointerId !== event.pointerId) return;
+      const rect = map.canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+
+      const zoom = Game.MAP_ZOOM_LEVELS[map.zoomIndex];
+      const span = zoom.halfSpan * 2;
+      const worldPerPixel = span / rect.width;
+      const pixelDx = event.clientX - map.dragStartX;
+      const pixelDz = event.clientY - map.dragStartY;
+
+      if (!map.dragMoved && Math.hypot(pixelDx, pixelDz) > 2) {
+        map.dragMoved = true;
+        map.followPlayer = false;
+        this.updatePhoneMapMeta();
+      }
+
+      if (!map.dragMoved) return;
+
+      const dx = pixelDx * worldPerPixel;
+      const dz = pixelDz * worldPerPixel;
+
+      map.centerX = map.dragCenterX - dx;
+      map.centerZ = map.dragCenterZ - dz;
+      this.markPhoneMapDirty();
+      this.renderPhoneMap(true);
+    };
+
+    const endDrag = (event) => {
+      if (map.pointerId !== null && event.pointerId !== undefined && map.pointerId !== event.pointerId) return;
+      if (map.canvas.releasePointerCapture && map.pointerId !== null) {
+        try { map.canvas.releasePointerCapture(map.pointerId); } catch (e) {}
+      }
+      map.dragging = false;
+      map.dragMoved = false;
+      map.pointerId = null;
+    };
+
+    map.canvas.onpointerup = endDrag;
+    map.canvas.onpointercancel = endDrag;
+    map.canvas.onpointerleave = (event) => {
+      if (map.dragging && (event.buttons & 1) === 0) {
+        endDrag(event);
+      }
+    };
+
+    if (map.followBtn) {
+      map.followBtn.onclick = () => {
+        map.followPlayer = true;
+        map.centerX = this.position.x;
+        map.centerZ = this.position.z;
+        this.updatePhoneMapMeta();
+        this.markPhoneMapDirty();
+        this.renderPhoneMap(true);
+      };
+    }
+
+    if (map.zoomInBtn) map.zoomInBtn.onclick = () => this.zoomPhoneMap(1);
+    if (map.zoomOutBtn) map.zoomOutBtn.onclick = () => this.zoomPhoneMap(-1);
+
+    this.updatePhoneMapMeta();
+    this.syncPhoneMapCanvasSize();
+  }
+
+  updatePhoneMapMeta() {
+    const map = this.phoneMap;
+    if (!map) return;
+
+    const zoom = Game.MAP_ZOOM_LEVELS[map.zoomIndex];
+
+    if (map.rangeLabel) map.rangeLabel.textContent = `Range ${zoom.label}`;
+    if (map.detailLabel) map.detailLabel.textContent = 'Noise terrain • Drag to pan • Wheel to zoom';
+
+    if (map.followBtn) {
+      map.followBtn.textContent = map.followPlayer ? 'Following' : 'Recenter';
+      map.followBtn.classList.toggle('active', map.followPlayer);
+    }
+
+    if (map.zoomInBtn) map.zoomInBtn.disabled = map.zoomIndex === 0;
+    if (map.zoomOutBtn) map.zoomOutBtn.disabled = map.zoomIndex === Game.MAP_ZOOM_LEVELS.length - 1;
+  }
+
+  zoomPhoneMap(direction) {
+    const map = this.phoneMap;
+    if (!map) return;
+
+    const nextIndex = Math.max(0, Math.min(Game.MAP_ZOOM_LEVELS.length - 1, map.zoomIndex - direction));
+    if (nextIndex === map.zoomIndex) return;
+
+    map.zoomIndex = nextIndex;
+    this.updatePhoneMapMeta();
+    this.markPhoneMapDirty();
+    this.renderPhoneMap(true);
+  }
+
+  markPhoneMapDirty() {
+    if (this.phoneMap) this.phoneMap.dirty = true;
+  }
+
+  syncPhoneMapCanvasSize() {
+    const map = this.phoneMap;
+    if (!map || !map.canvas) return false;
+
+    const rect = map.canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.max(220, Math.round(rect.width * dpr));
+    const height = Math.max(220, Math.round(rect.height * dpr));
+
+    if (map.canvas.width !== width || map.canvas.height !== height) {
+      map.canvas.width = width;
+      map.canvas.height = height;
+      map.dirty = true;
+    }
+
+    return true;
+  }
+
+  renderPhoneMap(force = false) {
+    const map = this.phoneMap;
+    if (!map || this.phoneActiveApp !== 'maps' || (!this.phoneOpen && !this.phoneDocked) || !map.canvas || !map.ctx) return;
+    if (!this.syncPhoneMapCanvasSize()) return;
+
+    const now = performance.now();
+    const zoom = Game.MAP_ZOOM_LEVELS[map.zoomIndex];
+    const playerMoved = Math.hypot(this.position.x - map.lastRenderPlayerX, this.position.z - map.lastRenderPlayerZ);
+    const headingChanged = Math.abs(this.euler.y - map.lastRenderHeading) > 0.03;
+
+    if (map.followPlayer) {
+      const centerShift = Math.hypot(this.position.x - map.centerX, this.position.z - map.centerZ);
+      map.centerX = this.position.x;
+      map.centerZ = this.position.z;
+      if (centerShift > 0.25) map.dirty = true;
+    }
+
+    if (!force && !map.dirty && now - map.lastRenderTime < 90 && playerMoved < zoom.halfSpan * 0.01 && !headingChanged) {
+      return;
+    }
+
+    const ctx = map.ctx;
+    const width = map.canvas.width;
+    const height = map.canvas.height;
+    const centerX = map.centerX;
+    const centerZ = map.centerZ;
+    const halfSpan = zoom.halfSpan;
+
+    ctx.clearRect(0, 0, width, height);
+
+    const bg = ctx.createLinearGradient(0, 0, 0, height);
+    bg.addColorStop(0, '#edf4e8');
+    bg.addColorStop(1, '#d8e5d1');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, width, height);
+
+    this.drawPhoneMapTerrainLayer(
+      ctx,
+      width,
+      height,
+      centerX,
+      centerZ,
+      halfSpan
+    );
+    this.drawPhoneMapRoads(ctx, width, height, centerX, centerZ, halfSpan);
+    this.drawPhoneMapTracker(ctx, width, height, centerX, centerZ, halfSpan);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = Math.max(1, Math.round(width / 220));
+    ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+
+    if (map.coordsLabel) {
+      const groundHeight = this.terrain.getHeight(this.position.x, this.position.z);
+      map.coordsLabel.textContent = `X ${Math.round(this.position.x)} • Z ${Math.round(this.position.z)} • Alt ${Math.round(groundHeight)}`;
+    }
+
+    map.lastRenderTime = now;
+    map.lastRenderPlayerX = this.position.x;
+    map.lastRenderPlayerZ = this.position.z;
+    map.lastRenderHeading = this.euler.y;
+    map.dirty = false;
+  }
+
+  drawPhoneMapTerrainLayer(ctx, width, height, centerX, centerZ, halfSpan) {
+    const raster = this.getPhoneMapTerrainRaster(width, height);
+    const imageData = raster.ctx.createImageData(raster.width, raster.height);
+    const pixels = imageData.data;
+    const heights = new Float32Array(raster.width * raster.height);
+    const span = halfSpan * 2;
+    const minX = centerX - halfSpan;
+    const minZ = centerZ - halfSpan;
+    const stepX = span / Math.max(1, raster.width - 1);
+    const stepZ = span / Math.max(1, raster.height - 1);
+    const waterLevel = this.waterLevel;
+    const lightX = this.phoneMapLightDir.x;
+    const lightY = this.phoneMapLightDir.y;
+    const lightZ = this.phoneMapLightDir.z;
+
+    for (let y = 0; y < raster.height; y++) {
+      const worldZ = minZ + y * stepZ;
+
+      for (let x = 0; x < raster.width; x++) {
+        const worldX = minX + x * stepX;
+        heights[y * raster.width + x] = this.terrain.getBaseHeight(worldX, worldZ);
+      }
+    }
+
+    for (let y = 0; y < raster.height; y++) {
+      const worldZ = minZ + y * stepZ;
+      const upY = Math.max(0, y - 1);
+      const downY = Math.min(raster.height - 1, y + 1);
+
+      for (let x = 0; x < raster.width; x++) {
+        const worldX = minX + x * stepX;
+        const index = y * raster.width + x;
+        const leftX = Math.max(0, x - 1);
+        const rightX = Math.min(raster.width - 1, x + 1);
+        const heightValue = heights[index];
+        const leftHeight = heights[y * raster.width + leftX];
+        const rightHeight = heights[y * raster.width + rightX];
+        const upHeight = heights[upY * raster.width + x];
+        const downHeight = heights[downY * raster.width + x];
+        const dx = -(rightHeight - leftHeight) / Math.max(stepX * (rightX - leftX || 1), 1e-4);
+        const dz = -(downHeight - upHeight) / Math.max(stepZ * (downY - upY || 1), 1e-4);
+        const invLength = 1 / Math.max(1e-4, Math.hypot(dx, 1.15, dz));
+        const light = Math.max(0, (dx * lightX + 1.15 * lightY + dz * lightZ) * invLength);
+        const shade = heightValue <= waterLevel ? 0.9 + light * 0.18 : 0.76 + light * 0.38;
+        const rgb = this.getPhoneMapNoiseColor(heightValue, worldX, worldZ, shade);
+        const offset = index * 4;
+
+        pixels[offset] = rgb[0];
+        pixels[offset + 1] = rgb[1];
+        pixels[offset + 2] = rgb[2];
+        pixels[offset + 3] = 255;
+      }
+    }
+
+    raster.ctx.putImageData(imageData, 0, 0);
+
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(raster.canvas, 0, 0, width, height);
+    ctx.restore();
+  }
+
+  getPhoneMapTerrainRaster(width, height) {
+    const map = this.phoneMap;
+    if (!map.terrainRasterCanvas) {
+      map.terrainRasterCanvas = document.createElement('canvas');
+      map.terrainRasterCtx = map.terrainRasterCanvas.getContext('2d', { alpha: false });
+    }
+
+    const sampleWidth = Math.max(96, Math.min(192, Math.round(width * 0.34)));
+    const sampleHeight = Math.max(96, Math.min(192, Math.round(height * 0.34)));
+
+    if (map.terrainRasterCanvas.width !== sampleWidth || map.terrainRasterCanvas.height !== sampleHeight) {
+      map.terrainRasterCanvas.width = sampleWidth;
+      map.terrainRasterCanvas.height = sampleHeight;
+    }
+
+    return {
+      canvas: map.terrainRasterCanvas,
+      ctx: map.terrainRasterCtx,
+      width: sampleWidth,
+      height: sampleHeight,
+    };
+  }
+
+  getPhoneMapNoiseColor(height, worldX, worldZ, shade) {
+    const waterLevel = this.waterLevel;
+
+    if (height <= waterLevel) {
+      const depth = Math.max(0, Math.min(1, (waterLevel - height) / 16));
+      return this.getPhoneMapShadedRgb([
+        72 - depth * 14,
+        142 + depth * 10,
+        214 + depth * 18,
+      ], shade);
+    }
+
+    if (height <= waterLevel + 5) {
+      const shoreBlend = Math.max(0, Math.min(1, (height - waterLevel) / 5));
+      return this.getPhoneMapShadedRgb([
+        214 - shoreBlend * 14,
+        203 - shoreBlend * 10,
+        164 - shoreBlend * 18,
+      ], 0.94 + shade * 0.06);
+    }
+
+    const terrainColor = this.terrain.getTerrainColor(height, worldX, worldZ);
+    return this.getPhoneMapShadedRgb([
+      terrainColor[0] * 255,
+      terrainColor[1] * 255,
+      terrainColor[2] * 255,
+    ], shade);
+  }
+
+  getPhoneMapShadedRgb(rgb, shade) {
+    const clamp = (value) => Math.max(0, Math.min(255, Math.round(value * shade)));
+    return [clamp(rgb[0]), clamp(rgb[1]), clamp(rgb[2])];
+  }
+
+  drawPhoneMapRoads(ctx, width, height, centerX, centerZ, halfSpan) {
+    const minX = centerX - halfSpan;
+    const minZ = centerZ - halfSpan;
+    const maxX = centerX + halfSpan;
+    const maxZ = centerZ + halfSpan;
+    const curves = this.terrain.getHighwayCurvesInBounds(minX, minZ, maxX, maxZ, halfSpan * 0.15);
+    const span = halfSpan * 2;
+    const projectX = (worldX) => ((worldX - minX) / span) * width;
+    const projectY = (worldZ) => ((worldZ - minZ) / span) * height;
+    const roadWidth = Math.max(2, Math.min(width * 0.09, (this.terrain.highwayHalfWidth * width) / halfSpan));
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, width, height);
+    ctx.clip();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    const strokeCurves = (strokeStyle, lineWidth, dashed = false) => {
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = lineWidth;
+      ctx.setLineDash(dashed ? [lineWidth * 2.4, lineWidth * 2.1] : []);
+
+      for (const curve of curves) {
+        const points = curve.points;
+        if (!points || points.length < 2) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(projectX(points[0].x), projectY(points[0].z));
+        for (let i = 1; i < points.length; i++) {
+          ctx.lineTo(projectX(points[i].x), projectY(points[i].z));
+        }
+        ctx.stroke();
+      }
+    };
+
+    strokeCurves('rgba(108, 114, 120, 0.26)', roadWidth + 5);
+    strokeCurves('rgba(246, 244, 240, 0.97)', roadWidth);
+
+    if (roadWidth >= 3.5) {
+      strokeCurves('rgba(235, 192, 74, 0.85)', Math.max(1.2, roadWidth * 0.16), true);
+    }
+
+    ctx.restore();
+  }
+
+  drawPhoneMapTracker(ctx, width, height, centerX, centerZ, halfSpan) {
+    const span = halfSpan * 2;
+    const px = ((this.position.x - (centerX - halfSpan)) / span) * width;
+    const py = ((this.position.z - (centerZ - halfSpan)) / span) * height;
+    const margin = Math.max(12, width * 0.04);
+    const inside = px >= margin && px <= width - margin && py >= margin && py <= height - margin;
+    const drawX = Math.max(margin, Math.min(width - margin, px));
+    const drawY = Math.max(margin, Math.min(height - margin, py));
+
+    ctx.save();
+    ctx.translate(drawX, drawY);
+
+    if (inside) {
+      ctx.fillStyle = 'rgba(255, 108, 108, 0.15)';
+      ctx.beginPath();
+      ctx.arc(0, 0, Math.max(10, width * 0.03), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.rotate(-this.euler.y);
+    ctx.fillStyle = '#ff6c6c';
+    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+    ctx.lineWidth = Math.max(1.5, width * 0.006);
+    ctx.beginPath();
+    ctx.moveTo(0, -12);
+    ctx.lineTo(8, 10);
+    ctx.lineTo(0, 6);
+    ctx.lineTo(-8, 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    if (!inside) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(10, 12, 18, 0.72)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.lineWidth = Math.max(1, width * 0.004);
+      ctx.beginPath();
+      ctx.rect(drawX - 18, drawY + 12, 36, 16);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `${Math.max(10, width * 0.028)}px Segoe UI`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('YOU', drawX, drawY + 20);
+      ctx.restore();
+    }
+  }
+
+  syncPhoneUI(immediate = false) {
+    if (!this.phoneUI) return;
+
+    const { root } = this.phoneUI;
+    const phoneVisible = this.phoneOpen || this.phoneDocked;
+    if (immediate) root.classList.add('no-anim');
+    root.classList.toggle('open', this.phoneOpen);
+    root.classList.toggle('docked', this.phoneDocked);
+    root.setAttribute('aria-hidden', phoneVisible ? 'false' : 'true');
+
+    const crosshair = document.getElementById('crosshair');
+    if (crosshair) crosshair.style.display = this.phoneOpen ? 'none' : 'block';
+
+    if (immediate) {
+      requestAnimationFrame(() => {
+        if (this.phoneUI && this.phoneUI.root) this.phoneUI.root.classList.remove('no-anim');
+      });
+    }
+  }
+
+  setPhoneOpen(open, options = {}) {
+    if (!this.hasPhone || !this.phoneUI) return;
+
+    const { skipPointerLock = false, immediate = false } = options;
+    const nextState = typeof open === 'string'
+      ? open
+      : (open ? 'open' : 'hidden');
+    const nextPhoneOpen = nextState === 'open';
+    const nextPhoneDocked = nextState === 'docked';
+
+    if (this.phoneOpen === nextPhoneOpen && this.phoneDocked === nextPhoneDocked && !immediate) return;
+
+    this.phoneOpen = nextPhoneOpen;
+    this.phoneDocked = nextPhoneDocked;
+
+    if (this.phoneMap) {
+      if (this.phoneMap.canvas && this.phoneMap.pointerId !== null && this.phoneMap.canvas.releasePointerCapture) {
+        try { this.phoneMap.canvas.releasePointerCapture(this.phoneMap.pointerId); } catch (e) {}
+      }
+      this.phoneMap.dragging = false;
+      this.phoneMap.dragMoved = false;
+      this.phoneMap.pointerId = null;
+      this.phoneMap.dirty = true;
+    }
+
+    if (this.phoneOpen) {
+      this.keys = {};
+      this.isRunning = false;
+      this.isCrouching = false;
+      this.mouseLocked = false;
+      this.openPhoneApp(this.phoneActiveApp);
+      this.updatePhoneClock(true);
+
+      const prompt = document.getElementById('lock-prompt');
+      if (prompt) prompt.style.display = 'none';
+      document.exitPointerLock();
+    } else if (!skipPointerLock && this.running && !this.paused) {
+      const prompt = document.getElementById('lock-prompt');
+      if (prompt) prompt.style.display = this.phoneDocked ? 'none' : 'block';
+      this.canvas.requestPointerLock();
+    }
+
+    this.syncPhoneUI(immediate);
+  }
+
   connectMultiplayer(token) {
     this.socket = io({
       auth: { token }
@@ -949,6 +1955,25 @@ class Game {
 
     this.socket.on('connect', () => {
       console.log('Connected to server');
+    });
+
+    this.socket.on('gameWorldTime', (data) => {
+      this.gameWorldStartTime = data.worldStartTime;
+      console.log('Synchronized with server time');
+    });
+
+    this.socket.on('gameTimeUpdate', (data) => {
+      // Periodic resync with server (optional, helps prevent drift)
+      // The client calculates time locally, but this confirms server thinking
+      const serverTime = data.currentTime;
+      const clientTime = (Date.now() - this.gameWorldStartTime) / this.timeCycleMs % 1.0;
+      // Only resync if drift is significant (more than 1 game hour = 1/24th of cycle)
+      const drift = Math.abs(serverTime - clientTime);
+      if (drift > 1/24 && drift < 0.5) { // Check drift is not wrapping around
+        console.warn('Time drift detected, minor adjustment made');
+        // Small adjustment to compensate for client/server clock differences
+        this.gameWorldStartTime = Date.now() - (serverTime * this.timeCycleMs);
+      }
     });
 
     this.socket.on('currentPlayers', (players) => {
@@ -968,9 +1993,12 @@ class Game {
       const player = this.otherPlayers[data.socketId];
       if (player) {
         player.targetX = data.x;
-        player.targetY = data.y;
+        player.targetY = data.y - this.playerHeight;
         player.targetZ = data.z;
         player.targetRY = data.ry;
+        player.isSwimming = !!data.isSwimming;
+        player.isJumping = !!data.isJumping;
+        player.isRunning = !!data.isRunning;
       }
     });
 
@@ -984,32 +2012,80 @@ class Game {
     });
   }
 
-  addOtherPlayer(socketId, data) {
-    const model = this.createPlayerModel(0xff6633);
-    model.position.set(data.x, data.y, data.z);
-    this.scene.add(model);
+  async addOtherPlayer(socketId, data) {
+    let player = this.otherPlayers[socketId];
+    const footY = data.y - this.playerHeight;
+
+    if (player) {
+      player.username = data.username;
+      player.targetX = data.x;
+      player.targetY = footY;
+      player.targetZ = data.z;
+      player.targetRY = data.ry || 0;
+      player.isSwimming = !!data.isSwimming;
+      player.isJumping = !!data.isJumping;
+      player.isRunning = !!data.isRunning;
+      if (player.label) player.label.textContent = data.username;
+      return;
+    }
 
     const label = this.createNameLabel(data.username);
 
-    this.otherPlayers[socketId] = {
-      model,
+    player = this.otherPlayers[socketId] = {
+      model: null,
+      mixer: null,
+      actions: null,
+      currentAction: null,
       label,
       username: data.username,
       targetX: data.x,
-      targetY: data.y,
+      targetY: footY,
       targetZ: data.z,
       targetRY: data.ry || 0,
+      isSwimming: !!data.isSwimming,
+      isJumping: !!data.isJumping,
+      isRunning: !!data.isRunning,
+      labelHeight: Game.CHARACTER_TARGET_HEIGHT + 0.35,
+      loading: true,
     };
+
+    try {
+      const character = await Game.createCharacterInstance();
+      if (!this.otherPlayers[socketId] || this.otherPlayers[socketId] !== player) return;
+
+      player.model = character.model;
+      player.mixer = character.mixer;
+      player.actions = character.actions;
+      player.labelHeight = character.labelHeight;
+    } catch (error) {
+      console.warn('Using placeholder character model for remote player:', error);
+      if (!this.otherPlayers[socketId] || this.otherPlayers[socketId] !== player) return;
+
+      player.model = this.createPlayerModel(0xff6633);
+      player.labelHeight = player.model.userData.labelHeight || 3.7;
+    }
+
+    player.loading = false;
+    if (!player.model) return;
+
+    player.model.position.set(player.targetX, player.targetY, player.targetZ);
+    player.model.rotation.y = player.targetRY;
+    this.scene.add(player.model);
+    Game.playCharacterAnimation(player, 'idle');
   }
 
   removeOtherPlayer(socketId) {
     const player = this.otherPlayers[socketId];
     if (player) {
-      this.scene.remove(player.model);
-      player.model.traverse((child) => {
-        if (child.geometry) child.geometry.dispose();
-        if (child.material) child.material.dispose();
-      });
+      if (player.model) {
+        this.scene.remove(player.model);
+        if (player.model.userData.disposeOnRemove) {
+          player.model.traverse((child) => {
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) child.material.dispose();
+          });
+        }
+      }
       if (player.label) player.label.remove();
       delete this.otherPlayers[socketId];
     }
@@ -1025,15 +2101,45 @@ class Game {
 
     for (const id in this.otherPlayers) {
       const p = this.otherPlayers[id];
+      if (!p.model) {
+        if (p.label) p.label.style.display = 'none';
+        continue;
+      }
+
+      const prevX = p.model.position.x;
+      const prevY = p.model.position.y;
+      const prevZ = p.model.position.z;
+
       // Smooth interpolation
       p.model.position.x += (p.targetX - p.model.position.x) * lerpFactor;
       p.model.position.y += (p.targetY - p.model.position.y) * lerpFactor;
       p.model.position.z += (p.targetZ - p.model.position.z) * lerpFactor;
-      p.model.rotation.y = p.targetRY;
+      p.model.rotation.y = p.targetRY + Game.CHARACTER_ROTATION_OFFSET + 180;
+
+      const horizontalSpeed = Math.hypot(
+        p.model.position.x - prevX,
+        p.model.position.z - prevZ
+      ) / Math.max(dt, 0.0001);
+
+      let animationState = 'idle';
+      if (p.isSwimming && p.actions && p.actions.swim) {
+        animationState = 'swim';
+      } else if (p.isJumping && p.actions && p.actions.jump) {
+        animationState = 'jump';
+      } else if (p.isRunning && (p.actions && (p.actions.run || p.actions.walk))) {
+        animationState = 'run';
+      } else if (horizontalSpeed > 0.35) {
+        animationState = (p.actions && p.actions.walk) ? 'walk' : 'run';
+      }
+
+      Game.playCharacterAnimation(p, animationState);
+      if (p.mixer) {
+        p.mixer.update(dt);
+      }
 
       // Update name label screen position
       const pos = p.model.position.clone();
-      pos.y += 3.5;
+      pos.y += p.labelHeight || 3.7;
       pos.project(this.camera);
 
       if (pos.z < 1) {
@@ -1079,6 +2185,14 @@ class Game {
     const crouchInd = document.getElementById('crouch-indicator');
     crouchInd.style.display = this.isCrouching ? 'block' : 'none';
 
+    if (this.phoneOpen || this.phoneDocked) {
+      this.updatePhoneClock();
+    }
+
+    if ((this.phoneOpen || this.phoneDocked) && this.phoneActiveApp === 'maps') {
+      this.renderPhoneMap();
+    }
+
     // Send position to server
     const now = Date.now();
     if (this.socket && now - this.lastSendTime > this.sendRate) {
@@ -1088,6 +2202,9 @@ class Game {
         z: this.position.z,
         rx: this.euler.x,
         ry: this.euler.y,
+        isSwimming: this.isSwimming,
+        isJumping: this.jumpAnimationTimer > 0 && !this.isSwimming,
+        isRunning: this.isRunning,
       });
       this.lastSendTime = now;
     }
@@ -1124,6 +2241,8 @@ class Game {
 
   updateMovement(dt) {
     const kb = this.settings.keybinds;
+    this.jumpAnimationTimer = Math.max(0, this.jumpAnimationTimer - dt);
+    const hasMoveInput = !!(this.keys[kb.forward] || this.keys[kb.backward] || this.keys[kb.left] || this.keys[kb.right]);
 
     // --- Swimming State ---
     const initialWaterSurfaceY = this.getWaterSurfaceHeight(this.position.x, this.position.z);
@@ -1133,7 +2252,7 @@ class Game {
     const swimmingNow = initialWaterDepth > this.playerHeight * 0.5;
 
     // --- Stamina / Running ---
-    const wantsRun = this.keys[kb.run] && !inWater && !swimmingNow;
+    const wantsRun = this.keys[kb.run] && hasMoveInput && !inWater && !swimmingNow;
     if (wantsRun && !this.isExhausted && this.stamina > 0) {
       this.isRunning = true;
       this.stamina -= this.staminaDrainRate * dt;
@@ -1175,14 +2294,33 @@ class Game {
     if (moveDir.lengthSq() > 0) {
       moveDir.normalize();
       let speed = this.moveSpeed;
-      if (this.isRunning && moveDir.dot(forward) > 0.5) speed *= this.runSpeedMultiplier;
+      if (this.isRunning) speed *= this.runSpeedMultiplier;
       if (this.isCrouching) speed *= this.crouchSpeedMultiplier;
 
       // Slow down in water
       if (inWater) speed *= (swimmingNow ? 0.4 : 0.6);
 
-      this.position.x += moveDir.x * speed * dt;
-      this.position.z += moveDir.z * speed * dt;
+      const newX = this.position.x + moveDir.x * speed * dt;
+      const newZ = this.position.z + moveDir.z * speed * dt;
+
+      // Check slope angle at new position
+      const normal = this.terrain.getSurfaceNormal(newX, newZ);
+      // For 50 degree slope: cos(50°) ≈ 0.6428
+      // Only allow movement if slope is not too steep
+      const MAX_SLOPE_ANGLE = 50 * Math.PI / 180; // 50 degrees in radians
+      const minNormalY = Math.cos(MAX_SLOPE_ANGLE); // ~0.6428
+      
+      // If moving upward, check if slope is walkable
+      const currentGroundY = this.terrain.getHeight(this.position.x, this.position.z);
+      const newGroundY = this.terrain.getHeight(newX, newZ);
+      const isMovingUpward = newGroundY > currentGroundY;
+      
+      if (!isMovingUpward || normal.y >= minNormalY) {
+        // Slope is walkable or moving downward
+        this.position.x = newX;
+        this.position.z = newZ;
+      }
+      // else: don't move (too steep)
     }
 
     // --- Gravity & Swimming ---

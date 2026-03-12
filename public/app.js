@@ -34,6 +34,8 @@
   let currentUser = null;
   let authToken   = null;
   let game        = null;
+  let characterPreview = null;
+  let characterPreviewLoad = null;
 
   // ---- Helpers ----------------------------------------------------------------
 
@@ -103,6 +105,7 @@
   // ---- Screen transitions -----------------------------------------------------
 
   function showAuth() {
+    stopCharacterPreview();
     authScreen.style.display  = 'flex';
     lobbyScreen.style.display = 'none';
     gameScreen.style.display  = 'none';
@@ -120,6 +123,7 @@
   }
 
   function showGame() {
+    stopCharacterPreview();
     authScreen.style.display  = 'none';
     lobbyScreen.style.display = 'none';
     gameScreen.style.display  = 'block';
@@ -127,24 +131,146 @@
 
   // ---- Lobby character preview -------------------------------------------------
 
-  function drawCharacterPreview() {
+  function ensureCharacterPreview() {
+    if (characterPreview) return characterPreview;
+
     const canvas = document.getElementById('character-canvas');
-    const ctx = canvas.getContext('2d');
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-    const cx = w / 2, s = 2.5;
-    ctx.fillStyle = '#ffcc99';
-    ctx.fillRect(cx - 15*s, 30, 30*s, 30*s);
-    ctx.fillStyle = '#2299ff';
-    ctx.fillRect(cx - 20*s, 30 + 30*s, 40*s, 50*s);
-    ctx.fillRect(cx - 30*s, 30 + 32*s, 8*s, 40*s);
-    ctx.fillRect(cx + 22*s, 30 + 32*s, 8*s, 40*s);
-    ctx.fillStyle = '#333366';
-    ctx.fillRect(cx - 15*s, 30 + 80*s, 12*s, 35*s);
-    ctx.fillRect(cx +  3*s, 30 + 80*s, 12*s, 35*s);
-    ctx.fillStyle = '#333';
-    ctx.fillRect(cx -  8*s, 30 + 10*s, 5*s, 5*s);
-    ctx.fillRect(cx +  3*s, 30 + 10*s, 5*s, 5*s);
+    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(canvas.width, canvas.height, false);
+    renderer.setClearColor(0x000000, 0);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(28, canvas.width / canvas.height, 0.1, 100);
+    camera.position.set(0, 1.75, 6.1);
+    camera.lookAt(0, 1.6, 0);
+
+    const clock = new THREE.Clock(false);
+    const turntable = new THREE.Group();
+    scene.add(turntable);
+
+    const hemiLight = new THREE.HemisphereLight(0xaed9ff, 0x243044, 1.2);
+    scene.add(hemiLight);
+
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
+    keyLight.position.set(4, 7, 6);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0x7b2ff7, 0.55);
+    rimLight.position.set(-5, 3, -4);
+    scene.add(rimLight);
+
+    const floor = new THREE.Mesh(
+      new THREE.CircleGeometry(2.35, 40),
+      new THREE.MeshBasicMaterial({
+        color: 0x7b2ff7,
+        transparent: true,
+        opacity: 0.12,
+        side: THREE.DoubleSide,
+      })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = 0.01;
+    scene.add(floor);
+
+    characterPreview = {
+      renderer,
+      scene,
+      camera,
+      clock,
+      turntable,
+      model: null,
+      mixer: null,
+      actions: null,
+      currentAction: null,
+      running: false,
+      rafId: 0,
+    };
+
+    return characterPreview;
+  }
+
+  function attachCharacterPreview(character, isPlaceholder = false) {
+    const preview = ensureCharacterPreview();
+
+    if (preview.model) {
+      preview.turntable.remove(preview.model);
+      if (preview.model.userData && preview.model.userData.disposeOnRemove) {
+        preview.model.traverse((child) => {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        });
+      }
+    }
+
+    preview.model = character.model;
+    preview.mixer = character.mixer || null;
+    preview.actions = character.actions || null;
+    preview.currentAction = null;
+    preview.isPlaceholder = isPlaceholder;
+    preview.turntable.add(preview.model);
+    preview.model.position.y = 0;
+    preview.turntable.rotation.y = 0;
+
+    Game.playCharacterAnimation(preview, 'idle', 0.12);
+  }
+
+  function renderCharacterPreview() {
+    if (!characterPreview || !characterPreview.running) return;
+
+    characterPreview.rafId = requestAnimationFrame(renderCharacterPreview);
+    const dt = Math.min(characterPreview.clock.getDelta(), 0.1);
+
+    if (characterPreview.mixer) {
+      characterPreview.mixer.update(dt);
+    }
+    characterPreview.turntable.rotation.y += dt * 0.45;
+    characterPreview.renderer.render(characterPreview.scene, characterPreview.camera);
+  }
+
+  function stopCharacterPreview() {
+    if (!characterPreview) return;
+    characterPreview.running = false;
+    if (characterPreview.rafId) {
+      cancelAnimationFrame(characterPreview.rafId);
+      characterPreview.rafId = 0;
+    }
+    characterPreview.clock.stop();
+  }
+
+  function drawCharacterPreview() {
+    const preview = ensureCharacterPreview();
+    preview.running = true;
+
+    if (!preview.rafId) {
+      preview.clock.start();
+      preview.clock.getDelta();
+      renderCharacterPreview();
+    }
+
+    if (preview.model) {
+      Game.playCharacterAnimation(preview, 'idle', 0.12);
+      return;
+    }
+
+    if (characterPreviewLoad) return;
+
+    characterPreviewLoad = Game.createCharacterInstance()
+      .then((character) => {
+        attachCharacterPreview(character);
+      })
+      .catch((error) => {
+        console.warn('Falling back to placeholder lobby preview:', error);
+        attachCharacterPreview({
+          model: Game.createPlaceholderCharacterModel(0x2299ff),
+          mixer: null,
+          actions: null,
+        }, true);
+      })
+      .finally(() => {
+        characterPreviewLoad = null;
+      });
   }
 
   // ---- Play / Leave -----------------------------------------------------------

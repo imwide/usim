@@ -1,6 +1,6 @@
 /**
  * Infinite chunked terrain system using Perlin noise,
- * with deterministic seeded highways carved into the landscape.
+ * with deterministic seeded city anchors connected by dry-land highways.
  */
 class TerrainManager {
   constructor(scene, noise) {
@@ -12,16 +12,28 @@ class TerrainManager {
     this.chunkSize = 64;        // vertices per chunk side
     this.chunkWorldSize = 128;  // world units per chunk
     this.viewDistance = 3;      // chunks visible in each direction
-    this.heightScale = 40;      // max terrain height
-    this.noiseScale = 0.008;    // noise frequency
-    this.waterLevel = -15.5;
+    this.continentHeightScale = 1000; // broad continents/oceans
+    this.detailHeightScale = 200;     // hills, valleys, lakes
+    this.heightScale = this.continentHeightScale + this.detailHeightScale;
+    this.continentNoiseScale = 0.00005;
+    this.detailNoiseScale = 0.00185;
+    this.waterLevel = 0;
 
-    // Highway configuration
-    this.highwayStep = 48;
+    // Highway / city network configuration
     this.highwayHalfWidth = 9;
     this.highwayShoulder = 10;
     this.highwayCurveSubdivisions = 10;
     this.roadSurfaceHeightOffset = 0.08;
+    this.citySpacing = 50000;
+    this.citySearchRadius = 17000;
+    this.cityMinElevation = 12;
+    this.cityMinConnections = 2;
+    this.cityConnectionCandidates = 4;
+    this.cityConnectionSearchRadiusCells = 4;
+    this.highwayPathStep = 2500;
+    this.highwayPathMargin = 30000;
+    this.highwayClearance = 5;
+    this.highwaySegmentCheckStep = 1200;
 
     this.chunks = new Map();    // key: "cx,cz" -> mesh
     this.material = new THREE.MeshLambertMaterial({
@@ -81,11 +93,20 @@ class TerrainManager {
 
   // Base terrain height before any roads flatten or cut the terrain
   getBaseHeight(worldX, worldZ) {
-    const nx = worldX * this.noiseScale;
-    const nz = worldZ * this.noiseScale;
-    let h = this.noise.fbm(nx, nz, 6, 2, 0.5);
-    h += 0.5 * this.noise.fbm(nx * 0.3, nz * 0.3, 3, 2, 0.5);
-    return h * this.heightScale;
+    const continentNoise = this.noise.perlin2(
+      worldX * this.continentNoiseScale,
+      worldZ * this.continentNoiseScale
+    );
+    const shapedContinent = Math.sign(continentNoise) * Math.pow(Math.abs(continentNoise), 1.18);
+    const continentHeight = shapedContinent * this.continentHeightScale;
+
+    const detailNoise = this.noise.perlin2(
+      worldX * this.detailNoiseScale,
+      worldZ * this.detailNoiseScale
+    );
+    const detailHeight = detailNoise * this.detailHeightScale;
+
+    return continentHeight + detailHeight;
   }
 
   // Get terrain height at world position after roads are applied
@@ -95,205 +116,201 @@ class TerrainManager {
     return roadInfo ? roadInfo.height : baseHeight;
   }
 
-  setupHighways() {
-    const nearEastWest = (this.hash2(3, 5, 1) - 0.5) * 120;
-    const nearNorthSouth = (this.hash2(-4, 7, 2) - 0.5) * 120;
+  getSurfaceNormal(worldX, worldZ) {
+    // Sample height at nearby points to compute surface normal
+    const sampleDist = 2; // sample distance
+    const h0 = this.getHeight(worldX, worldZ);
+    const hX = this.getHeight(worldX + sampleDist, worldZ);
+    const hZ = this.getHeight(worldX, worldZ + sampleDist);
 
-    this.highways = [
-      this.createHighway('HW-EW-1', 'ew', nearEastWest, 1),
-      this.createHighway('HW-NS-1', 'ns', nearNorthSouth, 2),
-    ];
+    // Compute normal from height differences
+    // Edge 1: (sampleDist, 0, hX - h0)
+    // Edge 2: (0, sampleDist, hZ - h0)
+    const normal = new THREE.Vector3(
+      -(hX - h0) / sampleDist,
+      1,
+      -(hZ - h0) / sampleDist
+    );
+    normal.normalize();
+    return normal;
   }
 
-  createHighway(id, orientation, baseOffset, salt) {
-    return {
-      id,
-      orientation,
-      salt,
-      baseOffset,
-      step: this.highwayStep,
+  setupHighways() {
+    this.highways = [];
+    this.cityCache = new Map();
+    this.highwayCache = new Map();
+  }
+
+  getCityKey(cellX, cellZ) {
+    return `${cellX},${cellZ}`;
+  }
+
+  getHighwayConnectionKey(cityA, cityB) {
+    return cityA.id < cityB.id
+      ? `${cityA.id}|${cityB.id}`
+      : `${cityB.id}|${cityA.id}`;
+  }
+
+  getCityReference(cellX, cellZ) {
+    const key = this.getCityKey(cellX, cellZ);
+    if (this.cityCache.has(key)) {
+      return this.cityCache.get(key);
+    }
+
+    const anchorX = cellX * this.citySpacing;
+    const anchorZ = cellZ * this.citySpacing;
+    let bestCandidate = null;
+
+    for (let attempt = 0; attempt < 14; attempt++) {
+      const angle = this.hash2(cellX * 17 + attempt * 13, cellZ * 29 - attempt * 7, 301) * Math.PI * 2;
+      const radiusFactor = attempt === 0
+        ? this.hash2(cellX, cellZ, 302) * 0.18
+        : 0.2 + this.hash2(cellX * -23 + attempt * 11, cellZ * 19 + attempt * 5, 303) * 0.8;
+      const radius = radiusFactor * this.citySearchRadius;
+      const x = anchorX + Math.cos(angle) * radius;
+      const z = anchorZ + Math.sin(angle) * radius;
+      const height = this.getBaseHeight(x, z);
+      const submergePenalty = height < this.waterLevel + this.cityMinElevation
+        ? (this.waterLevel + this.cityMinElevation - height) * 12000
+        : 0;
+      const shorelinePenalty = height < this.waterLevel + 40
+        ? (this.waterLevel + 40 - height) * 100
+        : 0;
+      const offsetPenalty = radius * 0.035;
+      const altitudePenalty = Math.abs(height - (this.waterLevel + 120)) * 0.05;
+      const score = submergePenalty + shorelinePenalty + offsetPenalty + altitudePenalty + attempt * 0.01;
+
+      if (!bestCandidate || score < bestCandidate.score) {
+        bestCandidate = { x, z, height, score };
+      }
+    }
+
+    const city = bestCandidate && bestCandidate.height >= this.waterLevel + this.cityMinElevation
+      ? {
+          id: `CITY-${cellX}-${cellZ}`,
+          cellX,
+          cellZ,
+          x: bestCandidate.x,
+          z: bestCandidate.z,
+          height: bestCandidate.height,
+        }
+      : null;
+
+    this.cityCache.set(key, city);
+    return city;
+  }
+
+  getCitiesInCellRange(minCellX, minCellZ, maxCellX, maxCellZ) {
+    const cities = [];
+
+    for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
+      for (let cellX = minCellX; cellX <= maxCellX; cellX++) {
+        const city = this.getCityReference(cellX, cellZ);
+        if (city) cities.push(city);
+      }
+    }
+
+    return cities;
+  }
+
+  getNearestCities(city, limit = this.cityConnectionCandidates) {
+    const candidates = [];
+
+    for (let radius = 1; radius <= this.cityConnectionSearchRadiusCells; radius++) {
+      for (let cellZ = city.cellZ - radius; cellZ <= city.cellZ + radius; cellZ++) {
+        for (let cellX = city.cellX - radius; cellX <= city.cellX + radius; cellX++) {
+          if (Math.max(Math.abs(cellX - city.cellX), Math.abs(cellZ - city.cellZ)) !== radius) continue;
+
+          const other = this.getCityReference(cellX, cellZ);
+          if (!other || other.id === city.id) continue;
+
+          const dx = other.x - city.x;
+          const dz = other.z - city.z;
+          candidates.push({ city: other, distSq: dx * dx + dz * dz });
+        }
+      }
+
+      if (candidates.length >= limit) break;
+    }
+
+    candidates.sort((a, b) => a.distSq - b.distSq);
+    return candidates.slice(0, limit).map((entry) => entry.city);
+  }
+
+  getCityConnectionCandidates(city) {
+    return this.getNearestCities(city, this.cityConnectionCandidates)
+      .map((other, index) => ({
+        city: other,
+        priority: this.hash2(
+          city.cellX * 37 + other.cellX * 11 + index,
+          city.cellZ * 41 + other.cellZ * 13 - index,
+          320
+        ),
+      }))
+      .sort((a, b) => a.priority - b.priority)
+      .map((entry) => entry.city);
+  }
+
+  ensureCityConnections(city) {
+    const candidates = this.getCityConnectionCandidates(city);
+    let successfulConnections = 0;
+
+    for (const otherCity of candidates) {
+      const highway = this.ensureHighwayConnection(city, otherCity);
+      if (highway) {
+        successfulConnections += 1;
+      }
+      if (successfulConnections >= this.cityMinConnections) {
+        break;
+      }
+    }
+  }
+
+  ensureRoadNetworkForBounds(minX, minZ, maxX, maxZ, padding = this.citySpacing * 0.75) {
+    const minCellX = Math.floor((minX - padding) / this.citySpacing) - 1;
+    const maxCellX = Math.ceil((maxX + padding) / this.citySpacing) + 1;
+    const minCellZ = Math.floor((minZ - padding) / this.citySpacing) - 1;
+    const maxCellZ = Math.ceil((maxZ + padding) / this.citySpacing) + 1;
+    const cities = this.getCitiesInCellRange(minCellX, minCellZ, maxCellX, maxCellZ);
+
+    for (const city of cities) {
+      this.ensureCityConnections(city);
+    }
+  }
+
+  ensureHighwayConnection(cityA, cityB) {
+    if (!cityA || !cityB || cityA.id === cityB.id) return null;
+
+    const connectionKey = this.getHighwayConnectionKey(cityA, cityB);
+    if (this.highwayCache.has(connectionKey)) {
+      return this.highwayCache.get(connectionKey);
+    }
+
+    const pathPoints = this.buildHighwayPath(cityA, cityB);
+    if (!pathPoints || pathPoints.length < 2) {
+      this.highwayCache.set(connectionKey, null);
+      return null;
+    }
+
+    const bounds = this.computeHighwayBounds(pathPoints);
+    const highway = {
+      id: `HW-${connectionKey}`,
+      fromCityId: cityA.id,
+      toCityId: cityB.id,
       halfWidth: this.highwayHalfWidth,
       shoulder: this.highwayShoulder,
       cutRadius: this.highwayHalfWidth + 2.5,
       influenceRadius: this.highwayHalfWidth + this.highwayShoulder,
-      driftScale: 0.00045 + this.hash2(salt, salt * 2, 10) * 0.00018,
-      driftAmplitude: 70 + this.hash2(salt, -salt, 11) * 45,
-      secondaryScale: 0.0010 + this.hash2(-salt, salt, 12) * 0.00035,
-      secondaryAmplitude: 18 + this.hash2(salt, salt, 13) * 16,
-      samples: new Map(),
-      curves: new Map(),
-      minIndex: 0,
-      maxIndex: 0,
+      points: pathPoints,
+      minX: bounds.minX,
+      minZ: bounds.minZ,
+      maxX: bounds.maxX,
+      maxZ: bounds.maxZ,
     };
-  }
 
-  catmullRom(a, b, c, d, t) {
-    const t2 = t * t;
-    const t3 = t2 * t;
-    return 0.5 * (
-      (2 * b) +
-      (-a + c) * t +
-      (2 * a - 5 * b + 4 * c - d) * t2 +
-      (-a + 3 * b - 3 * c + d) * t3
-    );
-  }
-
-  getHighwayGuideMinor(highway, major) {
-    const primary = this.noise.perlin2(
-      major * highway.driftScale + highway.salt * 17.13,
-      highway.salt * 12.73
-    ) * highway.driftAmplitude;
-
-    const secondary = this.noise.perlin2(
-      major * highway.secondaryScale - highway.salt * 9.17,
-      highway.salt * 31.21
-    ) * highway.secondaryAmplitude;
-
-    return highway.baseOffset + primary + secondary;
-  }
-
-  getHighwayWorldPoint(highway, major, minor) {
-    return highway.orientation === 'ew'
-      ? { x: major, z: minor }
-      : { x: minor, z: major };
-  }
-
-  getHighwayWaterPenalty(highway, major, minor) {
-    const drySpan = highway.halfWidth + highway.shoulder + 4;
-    const offsets = [-drySpan, -drySpan * 0.5, 0, drySpan * 0.5, drySpan];
-    let penalty = 0;
-
-    for (const offset of offsets) {
-      const point = highway.orientation === 'ew'
-        ? { x: major, z: minor + offset }
-        : { x: minor + offset, z: major };
-
-      const h = this.getBaseHeight(point.x, point.z);
-      const submergeAmount = this.waterLevel + 1.75 - h;
-      const shorelineAmount = this.waterLevel + 5.0 - h;
-
-      if (submergeAmount > 0) {
-        penalty += 18000 + submergeAmount * 5000;
-      } else if (shorelineAmount > 0) {
-        penalty += shorelineAmount * 50;
-      }
-    }
-
-    return penalty;
-  }
-
-  createHighwaySample(highway, prevSample, index) {
-    const major = index * highway.step;
-    const guideMinor = this.getHighwayGuideMinor(highway, major);
-    const anchorMinor = prevSample
-      ? this.lerp(prevSample.minor, guideMinor, 0.22)
-      : guideMinor;
-
-    const candidateOffsets = [0, -12, 12, -24, 24, -40, 40, -60, 60, -84, 84, -112, 112, -148, 148];
-    let best = null;
-
-    for (const offset of candidateOffsets) {
-      const minor = anchorMinor + offset;
-      const point = this.getHighwayWorldPoint(highway, major, minor);
-      const baseHeight = this.getBaseHeight(point.x, point.z);
-
-      let cost = Math.abs(offset) * 0.4;
-      cost += (minor - guideMinor) * (minor - guideMinor) * 0.016;
-      cost += this.getHighwayWaterPenalty(highway, major, minor);
-
-      const lowGround = this.waterLevel + 4.0 - baseHeight;
-      if (lowGround > 0) {
-        cost += lowGround * 900;
-      }
-
-      if (prevSample) {
-        const lateralDelta = minor - prevSample.minor;
-        cost += lateralDelta * lateralDelta * 0.028;
-        cost += Math.abs(baseHeight - prevSample.height) * 0.95;
-
-        const midX = (point.x + prevSample.x) * 0.5;
-        const midZ = (point.z + prevSample.z) * 0.5;
-        const midHeight = this.getBaseHeight(midX, midZ);
-        const midLowGround = this.waterLevel + 3.0 - midHeight;
-        if (midLowGround > 0) {
-          cost += 14000 + midLowGround * 3500;
-        }
-      }
-
-      cost += this.hash2(index, highway.salt, 97) * 0.01;
-
-      if (!best || cost < best.cost) {
-        best = { cost, major, minor, point, baseHeight };
-      }
-    }
-
-    return {
-      index,
-      major,
-      minor: best.minor,
-      x: best.point.x,
-      z: best.point.z,
-      height: best.baseHeight,
-    };
-  }
-
-  ensureHighwaySample(highway, index) {
-    if (!highway.samples.size) {
-      const sample0 = this.createHighwaySample(highway, null, 0);
-      highway.samples.set(0, sample0);
-      highway.minIndex = 0;
-      highway.maxIndex = 0;
-    }
-
-    if (index > highway.maxIndex) {
-      let prev = highway.samples.get(highway.maxIndex);
-      for (let i = highway.maxIndex + 1; i <= index; i++) {
-        const sample = this.createHighwaySample(highway, prev, i);
-        highway.samples.set(i, sample);
-        prev = sample;
-      }
-      highway.maxIndex = index;
-    }
-
-    if (index < highway.minIndex) {
-      let prev = highway.samples.get(highway.minIndex);
-      for (let i = highway.minIndex - 1; i >= index; i--) {
-        const sample = this.createHighwaySample(highway, prev, i);
-        highway.samples.set(i, sample);
-        prev = sample;
-      }
-      highway.minIndex = index;
-    }
-
-    return highway.samples.get(index);
-  }
-
-  getHighwayCurvePoint(highway, index, t) {
-    const p0 = this.ensureHighwaySample(highway, index - 1);
-    const p1 = this.ensureHighwaySample(highway, index);
-    const p2 = this.ensureHighwaySample(highway, index + 1);
-    const p3 = this.ensureHighwaySample(highway, index + 2);
-
-    return {
-      x: this.catmullRom(p0.x, p1.x, p2.x, p3.x, t),
-      z: this.catmullRom(p0.z, p1.z, p2.z, p3.z, t),
-      height: this.catmullRom(p0.height, p1.height, p2.height, p3.height, t),
-    };
-  }
-
-  ensureHighwayCurve(highway, index) {
-    if (highway.curves.has(index)) {
-      return highway.curves.get(index);
-    }
-
-    const points = [];
-    for (let i = 0; i <= this.highwayCurveSubdivisions; i++) {
-      const t = i / this.highwayCurveSubdivisions;
-      points.push(this.getHighwayCurvePoint(highway, index, t));
-    }
-
-    highway.curves.set(index, points);
-    return points;
+    this.highwayCache.set(connectionKey, highway);
+    this.highways.push(highway);
+    return highway;
   }
 
   projectPointToSegment(px, pz, ax, az, bx, bz) {
@@ -316,87 +333,313 @@ class TerrainManager {
     return { t, x, z, distSq: dx * dx + dz * dz };
   }
 
-  segmentIntersection2D(ax, az, bx, bz, cx, cz, dx, dz) {
-    const rX = bx - ax;
-    const rZ = bz - az;
-    const sX = dx - cx;
-    const sZ = dz - cz;
-    const denom = rX * sZ - rZ * sX;
-    if (Math.abs(denom) < 1e-5) return null;
+  isRoadPointDry(worldX, worldZ, baseHeight = null) {
+    const requiredHeight = this.waterLevel + this.highwayClearance;
+    const probeRadius = this.highwayHalfWidth + 3;
+    const sampleOffsets = [
+      [0, 0],
+      [probeRadius, 0],
+      [-probeRadius, 0],
+      [0, probeRadius],
+      [0, -probeRadius],
+      [probeRadius * 0.7, probeRadius * 0.7],
+      [-probeRadius * 0.7, probeRadius * 0.7],
+      [probeRadius * 0.7, -probeRadius * 0.7],
+      [-probeRadius * 0.7, -probeRadius * 0.7],
+    ];
 
-    const qpx = cx - ax;
-    const qpz = cz - az;
-    const t = (qpx * sZ - qpz * sX) / denom;
-    const u = (qpx * rZ - qpz * rX) / denom;
+    for (let i = 0; i < sampleOffsets.length; i++) {
+      const [offsetX, offsetZ] = sampleOffsets[i];
+      const height = i === 0 && baseHeight !== null
+        ? baseHeight
+        : this.getBaseHeight(worldX + offsetX, worldZ + offsetZ);
+      if (height < requiredHeight) {
+        return false;
+      }
+    }
 
-    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
-
-    return {
-      x: ax + rX * t,
-      z: az + rZ * t,
-      t,
-      u,
-    };
+    return true;
   }
 
-  appendIntersectionPatch(positions, indices, centerX, centerY, centerZ, radius, rotation = 0, sides = 8) {
-    const centerIndex = positions.length / 3;
-    positions.push(centerX, centerY, centerZ);
+  isRoadSegmentDry(startPoint, endPoint, sampleStep = this.highwaySegmentCheckStep) {
+    const distance = Math.hypot(endPoint.x - startPoint.x, endPoint.z - startPoint.z);
+    const steps = Math.max(1, Math.ceil(distance / sampleStep));
 
-    for (let i = 0; i < sides; i++) {
-      const angle = rotation + (i / sides) * Math.PI * 2;
-      positions.push(
-        centerX + Math.cos(angle) * radius,
-        centerY,
-        centerZ + Math.sin(angle) * radius
-      );
+    for (let stepIndex = 0; stepIndex <= steps; stepIndex++) {
+      const t = stepIndex / steps;
+      const x = this.lerp(startPoint.x, endPoint.x, t);
+      const z = this.lerp(startPoint.z, endPoint.z, t);
+      if (!this.isRoadPointDry(x, z)) {
+        return false;
+      }
     }
 
-    for (let i = 0; i < sides; i++) {
-      const a = centerIndex;
-      const b = centerIndex + 1 + i;
-      const c = centerIndex + 1 + ((i + 1) % sides);
-      indices.push(a, b, c);
+    return true;
+  }
+
+  buildHighwayPath(cityA, cityB) {
+    if (this.isRoadSegmentDry(cityA, cityB)) {
+      return this.resampleHighwayPath([cityA, cityB]);
     }
+
+    const marginAttempts = [
+      this.highwayPathMargin,
+      this.highwayPathMargin + this.citySpacing * 0.5,
+      this.highwayPathMargin + this.citySpacing,
+    ];
+
+    for (const margin of marginAttempts) {
+      const path = this.findDryHighwayPath(cityA, cityB, margin);
+      if (path && path.length >= 2) {
+        return this.resampleHighwayPath(this.simplifyHighwayPath(path));
+      }
+    }
+
+    return null;
+  }
+
+  findDryHighwayPath(cityA, cityB, margin) {
+    const step = this.highwayPathStep;
+    const startGX = Math.round(cityA.x / step);
+    const startGZ = Math.round(cityA.z / step);
+    const endGX = Math.round(cityB.x / step);
+    const endGZ = Math.round(cityB.z / step);
+    const startKey = `${startGX},${startGZ}`;
+    const endKey = `${endGX},${endGZ}`;
+
+    if (startKey === endKey) {
+      return [cityA, cityB];
+    }
+
+    const minGX = Math.floor((Math.min(cityA.x, cityB.x) - margin) / step);
+    const maxGX = Math.ceil((Math.max(cityA.x, cityB.x) + margin) / step);
+    const minGZ = Math.floor((Math.min(cityA.z, cityB.z) - margin) / step);
+    const maxGZ = Math.ceil((Math.max(cityA.z, cityB.z) + margin) / step);
+    const openNodes = new Map();
+    const closedKeys = new Set();
+    const nodeRecords = new Map();
+    const terrainNodeCache = new Map();
+    const directions = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1],
+    ];
+    const heuristic = (gx, gz) => Math.hypot((endGX - gx) * step, (endGZ - gz) * step);
+    const getNodeSample = (gx, gz, key) => {
+      if (key === startKey) {
+        return { x: cityA.x, z: cityA.z, height: cityA.height, dry: true };
+      }
+      if (key === endKey) {
+        return { x: cityB.x, z: cityB.z, height: cityB.height, dry: true };
+      }
+      if (terrainNodeCache.has(key)) {
+        return terrainNodeCache.get(key);
+      }
+
+      const x = gx * step;
+      const z = gz * step;
+      const height = this.getBaseHeight(x, z);
+      const sample = {
+        x,
+        z,
+        height,
+        dry: this.isRoadPointDry(x, z, height),
+      };
+      terrainNodeCache.set(key, sample);
+      return sample;
+    };
+
+    const startRecord = {
+      key: startKey,
+      gx: startGX,
+      gz: startGZ,
+      x: cityA.x,
+      z: cityA.z,
+      height: cityA.height,
+      g: 0,
+      h: heuristic(startGX, startGZ),
+      f: heuristic(startGX, startGZ),
+      parentKey: null,
+    };
+    openNodes.set(startKey, startRecord);
+    nodeRecords.set(startKey, startRecord);
+
+    let iterations = 0;
+    while (openNodes.size && iterations < 40000) {
+      iterations += 1;
+      let current = null;
+      for (const node of openNodes.values()) {
+        if (!current || node.f < current.f || (node.f === current.f && node.h < current.h)) {
+          current = node;
+        }
+      }
+
+      if (!current) break;
+      openNodes.delete(current.key);
+
+      if (current.key === endKey) {
+        const path = [];
+        let walkKey = current.key;
+        while (walkKey) {
+          const node = nodeRecords.get(walkKey);
+          path.push({ x: node.x, z: node.z, height: node.height });
+          walkKey = node.parentKey;
+        }
+        path.reverse();
+        return path;
+      }
+
+      closedKeys.add(current.key);
+
+      for (const [dx, dz] of directions) {
+        const nextGX = current.gx + dx;
+        const nextGZ = current.gz + dz;
+        if (nextGX < minGX || nextGX > maxGX || nextGZ < minGZ || nextGZ > maxGZ) continue;
+
+        const nextKey = `${nextGX},${nextGZ}`;
+        if (closedKeys.has(nextKey)) continue;
+
+        const nextSample = getNodeSample(nextGX, nextGZ, nextKey);
+        if (!nextSample.dry && nextKey !== endKey) continue;
+        if (!this.isRoadSegmentDry(current, nextSample)) continue;
+
+        const moveDistance = Math.hypot(nextSample.x - current.x, nextSample.z - current.z);
+        const elevationDelta = Math.abs(nextSample.height - current.height);
+        const shorelinePenalty = Math.max(0, this.waterLevel + 35 - nextSample.height) * 2.5;
+        const slopePenalty = elevationDelta * 0.08;
+        const turnPenalty = dx !== 0 && dz !== 0 ? step * 0.03 : 0;
+        const tentativeG = current.g + moveDistance + slopePenalty + shorelinePenalty + turnPenalty;
+        const existing = nodeRecords.get(nextKey);
+
+        if (existing && tentativeG >= existing.g) continue;
+
+        const h = heuristic(nextGX, nextGZ);
+        const nextRecord = {
+          key: nextKey,
+          gx: nextGX,
+          gz: nextGZ,
+          x: nextSample.x,
+          z: nextSample.z,
+          height: nextSample.height,
+          g: tentativeG,
+          h,
+          f: tentativeG + h,
+          parentKey: current.key,
+        };
+
+        nodeRecords.set(nextKey, nextRecord);
+        openNodes.set(nextKey, nextRecord);
+      }
+    }
+
+    return null;
+  }
+
+  simplifyHighwayPath(points) {
+    if (!points || points.length <= 2) return points;
+
+    const simplified = [points[0]];
+    let anchorIndex = 0;
+
+    while (anchorIndex < points.length - 1) {
+      let nextIndex = points.length - 1;
+      while (nextIndex > anchorIndex + 1) {
+        if (this.isRoadSegmentDry(points[anchorIndex], points[nextIndex])) {
+          break;
+        }
+        nextIndex -= 1;
+      }
+
+      simplified.push(points[nextIndex]);
+      anchorIndex = nextIndex;
+    }
+
+    return simplified;
+  }
+
+  resampleHighwayPath(points) {
+    if (!points || points.length < 2) return points;
+
+    const resampled = [{ x: points[0].x, z: points[0].z, height: points[0].height }];
+
+    for (let index = 1; index < points.length; index++) {
+      const start = points[index - 1];
+      const end = points[index];
+      const distance = Math.hypot(end.x - start.x, end.z - start.z);
+      const steps = Math.max(1, Math.ceil(distance / Math.max(1, this.highwayPathStep * 0.6)));
+
+      for (let stepIndex = 1; stepIndex <= steps; stepIndex++) {
+        const t = stepIndex / steps;
+        const x = this.lerp(start.x, end.x, t);
+        const z = this.lerp(start.z, end.z, t);
+        resampled.push({
+          x,
+          z,
+          height: this.getBaseHeight(x, z),
+        });
+      }
+    }
+
+    return resampled;
+  }
+
+  computeHighwayBounds(points) {
+    let minX = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxZ = -Infinity;
+
+    for (const point of points) {
+      if (point.x < minX) minX = point.x;
+      if (point.z < minZ) minZ = point.z;
+      if (point.x > maxX) maxX = point.x;
+      if (point.z > maxZ) maxZ = point.z;
+    }
+
+    return { minX, minZ, maxX, maxZ };
   }
 
   getHighwayInfluence(highway, worldX, worldZ) {
-    const majorCoord = highway.orientation === 'ew' ? worldX : worldZ;
-    const centerIndex = Math.floor(majorCoord / highway.step);
-    const lookAround = 2;
-
-    this.ensureHighwaySample(highway, centerIndex - lookAround - 1);
-    this.ensureHighwaySample(highway, centerIndex + lookAround + 2);
+    if (
+      worldX < highway.minX - highway.influenceRadius ||
+      worldX > highway.maxX + highway.influenceRadius ||
+      worldZ < highway.minZ - highway.influenceRadius ||
+      worldZ > highway.maxZ + highway.influenceRadius
+    ) {
+      return null;
+    }
 
     let best = null;
 
-    for (let i = centerIndex - lookAround; i <= centerIndex + lookAround; i++) {
-      const curve = this.ensureHighwayCurve(highway, i);
-      for (let j = 0; j < curve.length - 1; j++) {
-        const a = curve[j];
-        const b = curve[j + 1];
-        const projection = this.projectPointToSegment(worldX, worldZ, a.x, a.z, b.x, b.z);
-        if (projection.distSq > highway.influenceRadius * highway.influenceRadius) continue;
+    for (let index = 0; index < highway.points.length - 1; index++) {
+      const start = highway.points[index];
+      const end = highway.points[index + 1];
+      const projection = this.projectPointToSegment(worldX, worldZ, start.x, start.z, end.x, end.z);
+      if (projection.distSq > highway.influenceRadius * highway.influenceRadius) continue;
 
-        const dist = Math.sqrt(projection.distSq);
-        const roadHeight = this.lerp(a.height, b.height, projection.t);
-        if (roadHeight < this.waterLevel + 0.9) continue;
+      const dist = Math.sqrt(projection.distSq);
+      const roadHeight = this.lerp(start.height, end.height, projection.t);
+      if (roadHeight < this.waterLevel + this.highwayClearance) continue;
 
-        const flattenWeight = dist <= highway.cutRadius
-          ? 1
-          : 1 - this.smoothstep(highway.cutRadius, highway.influenceRadius, dist);
-        const coreWeight = dist <= highway.halfWidth ? 1 : 0;
-        const shoulderWeight = 0;
+      const flattenWeight = dist <= highway.cutRadius
+        ? 1
+        : 1 - this.smoothstep(highway.cutRadius, highway.influenceRadius, dist);
+      const coreWeight = dist <= highway.halfWidth ? 1 : 0;
+      const shoulderWeight = 0;
 
-        if (!best || dist < best.dist) {
-          best = {
-            dist,
-            roadHeight,
-            flattenWeight,
-            coreWeight,
-            shoulderWeight,
-          };
-        }
+      if (!best || dist < best.dist) {
+        best = {
+          dist,
+          roadHeight,
+          flattenWeight,
+          coreWeight,
+          shoulderWeight,
+        };
       }
     }
 
@@ -436,32 +679,90 @@ class TerrainManager {
     };
   }
 
+  getHighwayCurvesInBounds(minX, minZ, maxX, maxZ, padding = 0) {
+    this.ensureRoadNetworkForBounds(minX, minZ, maxX, maxZ, Math.max(padding, this.citySpacing * 0.75));
+
+    const curves = [];
+
+    for (const highway of this.highways) {
+      if (
+        highway.maxX < minX - padding ||
+        highway.minX > maxX + padding ||
+        highway.maxZ < minZ - padding ||
+        highway.minZ > maxZ + padding
+      ) {
+        continue;
+      }
+
+      curves.push({
+        highwayId: highway.id,
+        orientation: 'path',
+        halfWidth: highway.halfWidth,
+        points: highway.points.map((point) => ({
+          x: point.x,
+          z: point.z,
+        })),
+      });
+    }
+
+    return curves;
+  }
+
+  getCityReferencePointsInBounds(minX, minZ, maxX, maxZ, padding = 0) {
+    const minCellX = Math.floor((minX - padding) / this.citySpacing) - 1;
+    const maxCellX = Math.ceil((maxX + padding) / this.citySpacing) + 1;
+    const minCellZ = Math.floor((minZ - padding) / this.citySpacing) - 1;
+    const maxCellZ = Math.ceil((maxZ + padding) / this.citySpacing) + 1;
+
+    return this.getCitiesInCellRange(minCellX, minCellZ, maxCellX, maxCellZ).filter((city) => (
+      city.x >= minX - padding &&
+      city.x <= maxX + padding &&
+      city.z >= minZ - padding &&
+      city.z <= maxZ + padding
+    ));
+  }
+
   getTerrainColor(height, worldX, worldZ) {
-    const t = (height / this.heightScale + 1) * 0.5;
+    const aboveSeaLevel = height - this.waterLevel;
 
-    if (t < 0.3) {
-      return [0.1, 0.3, 0.6];
+    if (aboveSeaLevel <= 0) {
+      const depth = this.clamp(-aboveSeaLevel / this.continentHeightScale, 0, 1);
+      return this.mix3([0.1, 0.34, 0.62], [0.02, 0.08, 0.22], depth);
     }
 
-    if (t < 0.4) {
-      const shoreline = (t - 0.3) / 0.1;
-      const wetness = 1 - shoreline;
-      const duneNoise = this.noise.perlin2(worldX * 0.025, worldZ * 0.025) * 0.5 + 0.5;
-      const brightness = 0.88 + duneNoise * 0.10 - wetness * 0.08;
-      return [0.68 * brightness, 0.62 * brightness, 0.42 * brightness];
+    if (aboveSeaLevel < 30) {
+      const shoreline = this.smoothstep(0, 30, aboveSeaLevel);
+      const duneNoise = this.noise.perlin2(worldX * 0.012, worldZ * 0.012) * 0.5 + 0.5;
+      const brightness = 0.9 + duneNoise * 0.08;
+      return this.mix3(
+        [0.7 * brightness, 0.66 * brightness, 0.48 * brightness],
+        [0.45, 0.56, 0.31],
+        shoreline
+      );
     }
 
-    if (t < 0.7) {
-      const g = 0.3 + (t - 0.4) * 0.5;
-      return [0.2, g, 0.15];
+    if (aboveSeaLevel < 220) {
+      const t = this.smoothstep(30, 220, aboveSeaLevel);
+      const vegetation = this.noise.perlin2(worldX * 0.01, worldZ * 0.01) * 0.5 + 0.5;
+      return this.mix3(
+        [0.26, 0.5 + vegetation * 0.08, 0.19],
+        [0.22, 0.44, 0.17],
+        t
+      );
     }
 
-    if (t < 0.85) {
-      const g = 0.4 + (t - 0.7) * 1.5;
-      return [g, g, g];
+    if (aboveSeaLevel < 520) {
+      const t = this.smoothstep(220, 520, aboveSeaLevel);
+      return this.mix3([0.24, 0.4, 0.18], [0.42, 0.36, 0.24], t);
     }
 
-    return [0.95, 0.95, 0.98];
+    if (aboveSeaLevel < 900) {
+      const t = this.smoothstep(520, 900, aboveSeaLevel);
+      return this.mix3([0.42, 0.36, 0.24], [0.62, 0.6, 0.58], t);
+    }
+
+    const snow = this.smoothstep(900, this.heightScale, aboveSeaLevel);
+    return this.mix3([0.62, 0.6, 0.58], [0.95, 0.96, 0.98], snow);
   }
 
   getSurfaceColor(height, worldX, worldZ, roadInfo) {
@@ -589,6 +890,14 @@ class TerrainManager {
   update(playerX, playerZ) {
     const { cx: pcx, cz: pcz } = this.worldToChunk(playerX, playerZ);
     const needed = new Set();
+    const preloadRadius = (this.viewDistance + 1) * this.chunkWorldSize;
+
+    this.ensureRoadNetworkForBounds(
+      playerX - preloadRadius,
+      playerZ - preloadRadius,
+      playerX + preloadRadius,
+      playerZ + preloadRadius
+    );
 
     for (let dz = -this.viewDistance; dz <= this.viewDistance; dz++) {
       for (let dx = -this.viewDistance; dx <= this.viewDistance; dx++) {

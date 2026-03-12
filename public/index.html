@@ -39,6 +39,7 @@
       font-size: 2.5rem;
       margin-bottom: 8px;
       background: linear-gradient(135deg, #00d2ff, #7b2ff7);
+      background-clip: text;
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       font-weight: 800;
@@ -372,6 +373,492 @@
       cursor: pointer;
     }
 
+    #phone-hint {
+      position: absolute;
+      bottom: 16px;
+      right: 16px;
+      background: rgba(0,0,0,0.5);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      color: #aaa;
+      letter-spacing: 0.4px;
+    }
+
+    #phone-root {
+      position: absolute;
+      left: 50%;
+      right: auto;
+      bottom: 18px;
+      z-index: 90;
+      opacity: 0;
+      pointer-events: none;
+      user-select: none;
+      transform-origin: bottom center;
+      transform: translate(-50%, 120%) rotate(-14deg) scale(0.92);
+      transition: transform 0.34s cubic-bezier(0.2, 0.9, 0.2, 1), opacity 0.22s ease;
+    }
+
+    #phone-root.open {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translate(-50%, 0) rotate(0deg) scale(1);
+    }
+
+    #phone-root.docked {
+      left: auto;
+      right: 18px;
+      bottom: 18px;
+      opacity: 1;
+      pointer-events: none;
+      transform-origin: bottom right;
+      transform: translate(0, 0) rotate(0deg) scale(0.42);
+      filter: saturate(0.96) brightness(0.97);
+    }
+
+    #phone-root.docked .phone-home-indicator {
+      opacity: 0;
+    }
+
+    #phone-root.no-anim {
+      transition: none;
+    }
+
+    .phone-shell {
+      width: 320px;
+      padding: 12px;
+      border-radius: 34px;
+      background: linear-gradient(180deg, #252936, #0d1118);
+      border: 1px solid rgba(255,255,255,0.14);
+      box-shadow: 0 26px 60px rgba(0,0,0,0.48), inset 0 1px 0 rgba(255,255,255,0.14);
+    }
+
+    .phone-screen {
+      position: relative;
+      min-height: 560px;
+      border-radius: 24px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, rgba(93, 194, 255, 0.24), transparent 34%),
+        linear-gradient(180deg, #141c2d 0%, #1c1433 52%, #0b0f18 100%);
+      border: 1px solid rgba(255,255,255,0.08);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .phone-status {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 18px 10px;
+      color: rgba(255,255,255,0.92);
+      font-size: 0.85rem;
+      letter-spacing: 0.6px;
+    }
+
+    .phone-status-icons {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: rgba(255,255,255,0.62);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+    }
+
+    .phone-status-btn {
+      border: none;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 0.14s ease;
+    }
+
+    .phone-status-btn:hover {
+      background: rgba(255,255,255,0.18);
+    }
+
+    .phone-page {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 12px 18px 18px;
+      gap: 14px;
+    }
+
+    .phone-home-header {
+      padding-top: 6px;
+    }
+
+    .phone-home-title {
+      color: #fff;
+      font-size: 1.45rem;
+      font-weight: 700;
+    }
+
+    .phone-home-subtitle,
+    #phone-app-subtitle {
+      color: rgba(255,255,255,0.62);
+      font-size: 0.85rem;
+      margin-top: 4px;
+    }
+
+    .phone-app-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 8px;
+    }
+
+    .phone-app {
+      border: none;
+      border-radius: 22px;
+      padding: 18px 14px;
+      min-height: 126px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: space-between;
+      background: rgba(255,255,255,0.08);
+      color: #fff;
+      cursor: pointer;
+      text-align: left;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+      transition: transform 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+    }
+
+    .phone-app:hover {
+      transform: translateY(-2px);
+      background: rgba(255,255,255,0.12);
+      box-shadow: 0 10px 24px rgba(0,0,0,0.22), inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+
+    .phone-app-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 72px;
+      padding: 10px 12px;
+      border-radius: 18px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.9px;
+      background: linear-gradient(135deg, rgba(0,210,255,0.85), rgba(123,47,247,0.85));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
+    }
+
+    .phone-app-label {
+      font-size: 0.96rem;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+
+    .phone-app-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    #phone-app-title {
+      color: #fff;
+      font-size: 1.28rem;
+      font-weight: 700;
+      margin-top: 2px;
+    }
+
+    .phone-app-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .phone-chip-btn {
+      border: none;
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.78rem;
+      letter-spacing: 0.3px;
+      transition: background 0.14s ease;
+    }
+
+    .phone-chip-btn:hover {
+      background: rgba(255,255,255,0.16);
+    }
+
+    .phone-app-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .phone-card {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 16px;
+      color: rgba(255,255,255,0.9);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+
+    .phone-card p {
+      color: rgba(255,255,255,0.68);
+      font-size: 0.86rem;
+      line-height: 1.5;
+      margin-top: 12px;
+    }
+
+    .phone-card-title {
+      color: #fff;
+      font-size: 0.9rem;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+    }
+
+    .phone-list-item,
+    .phone-shop-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 0;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .phone-list-item:first-of-type,
+    .phone-shop-row:first-of-type {
+      border-top: none;
+      padding-top: 0;
+    }
+
+    .phone-list-item {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .phone-list-item strong,
+    .phone-shop-row strong {
+      color: #fff;
+    }
+
+    .phone-list-item span,
+    .phone-shop-row span {
+      color: rgba(255,255,255,0.68);
+      font-size: 0.84rem;
+      line-height: 1.45;
+    }
+
+    .phone-call-pill {
+      padding: 11px 14px;
+      margin-top: 10px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.08);
+      color: #fff;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+
+    .phone-map-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .phone-map-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .phone-map-toolbar-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .phone-map-range {
+      color: #fff;
+      font-size: 0.92rem;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+
+    .phone-map-detail {
+      color: rgba(255,255,255,0.62);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.9px;
+      line-height: 1.35;
+    }
+
+    .phone-map-toolbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .phone-map-tool-btn {
+      border: none;
+      border-radius: 12px;
+      min-width: 34px;
+      height: 34px;
+      padding: 0 11px;
+      background: rgba(255,255,255,0.09);
+      color: #fff;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.14s ease, transform 0.14s ease, opacity 0.14s ease;
+    }
+
+    .phone-map-tool-btn:hover:not(:disabled) {
+      background: rgba(255,255,255,0.16);
+      transform: translateY(-1px);
+    }
+
+    .phone-map-tool-btn:disabled {
+      opacity: 0.42;
+      cursor: default;
+    }
+
+    .phone-map-tool-btn.follow {
+      min-width: 88px;
+      font-size: 0.74rem;
+      letter-spacing: 0.7px;
+      text-transform: uppercase;
+    }
+
+    .phone-map-tool-btn.follow.active {
+      background: linear-gradient(135deg, rgba(0,210,255,0.35), rgba(123,47,247,0.35));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.1);
+    }
+
+    .phone-map-canvas-wrap {
+      position: relative;
+      overflow: hidden;
+      border-radius: 20px;
+      background: rgba(3, 8, 16, 0.65);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+    }
+
+    #phone-map-canvas {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      touch-action: none;
+      cursor: grab;
+      background: linear-gradient(180deg, rgba(13, 19, 29, 0.95), rgba(9, 12, 18, 0.95));
+    }
+
+    #phone-map-canvas:active {
+      cursor: grabbing;
+    }
+
+    .phone-map-compass {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.42);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: rgba(255,255,255,0.88);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      pointer-events: none;
+    }
+
+    .phone-map-readout {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .phone-map-coords {
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.07);
+      color: rgba(255,255,255,0.82);
+      font-family: monospace;
+      font-size: 0.82rem;
+      letter-spacing: 0.3px;
+    }
+
+    .phone-map-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .phone-map-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      color: rgba(255,255,255,0.78);
+      font-size: 0.76rem;
+      letter-spacing: 0.2px;
+    }
+
+    .phone-map-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .phone-map-swatch.water {
+      background: #3d8fff;
+      box-shadow: 0 0 0 3px rgba(61,143,255,0.14);
+    }
+
+    .phone-map-swatch.road {
+      background: #f7e38c;
+      box-shadow: 0 0 0 3px rgba(247,227,140,0.12);
+    }
+
+    .phone-map-swatch.player {
+      background: #ff6c6c;
+      box-shadow: 0 0 0 3px rgba(255,108,108,0.14);
+    }
+
+    .phone-home-indicator {
+      display: block;
+      width: 132px;
+      height: 5px;
+      margin: 12px auto 2px;
+      border: none;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.4);
+      cursor: pointer;
+    }
+
+    .phone-home-indicator:hover {
+      background: rgba(255,255,255,0.58);
+    }
+
     /* ---- Pause Menu ---- */
     #pause-menu {
       display: none;
@@ -628,6 +1115,64 @@
       <div id="crouch-indicator">Crouching</div>
       <div id="player-names"></div>
       <div id="lock-prompt" style="display:none;">Click to play &mdash; Esc to pause</div>
+      <div id="phone-hint">Phone: <span id="phone-keybind-hint">P</span></div>
+    </div>
+
+    <div id="phone-root" aria-hidden="true">
+      <div class="phone-shell">
+        <div class="phone-screen">
+          <div class="phone-status">
+            <div id="phone-time">00:00</div>
+            <div class="phone-status-icons">
+              <span>5G</span>
+              <span>100%</span>
+              <button id="phone-dock" class="phone-status-btn" type="button">Dock</button>
+            </div>
+          </div>
+
+          <div id="phone-home" class="phone-page">
+            <div class="phone-home-header">
+              <div class="phone-home-title">USIM Phone</div>
+              <div class="phone-home-subtitle">Select an app</div>
+            </div>
+
+            <div class="phone-app-grid">
+              <button class="phone-app" data-app="messages" type="button">
+                <span class="phone-app-icon">MSG</span>
+                <span class="phone-app-label">Messages</span>
+              </button>
+              <button class="phone-app" data-app="maps" type="button">
+                <span class="phone-app-icon">MAP</span>
+                <span class="phone-app-label">Maps</span>
+              </button>
+              <button class="phone-app" data-app="calls" type="button">
+                <span class="phone-app-icon">CALL</span>
+                <span class="phone-app-label">Calls</span>
+              </button>
+              <button class="phone-app" data-app="shop" type="button">
+                <span class="phone-app-icon">SHOP</span>
+                <span class="phone-app-label">Shop</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="phone-app-view" class="phone-page" style="display:none;">
+            <div class="phone-app-header">
+              <div>
+                <div id="phone-app-title">Messages</div>
+                <div id="phone-app-subtitle">Inbox synced</div>
+              </div>
+              <div class="phone-app-actions">
+                <button id="phone-back" class="phone-chip-btn" type="button">Home</button>
+                <button id="phone-close" class="phone-chip-btn" type="button">Hide</button>
+              </div>
+            </div>
+            <div id="phone-app-body" class="phone-app-body"></div>
+          </div>
+        </div>
+
+        <button id="phone-home-btn" class="phone-home-indicator" type="button" aria-label="Go to phone home screen"></button>
+      </div>
     </div>
 
     <!-- Pause Menu -->
@@ -662,6 +1207,7 @@
         <div class="settings-row"><label>Jump</label>     <button class="keybind-btn" data-action="jump"></button></div>
         <div class="settings-row"><label>Run</label>      <button class="keybind-btn" data-action="run"></button></div>
         <div class="settings-row"><label>Crouch</label>   <button class="keybind-btn" data-action="crouch"></button></div>
+        <div class="settings-row"><label>Phone</label>    <button class="keybind-btn" data-action="phone"></button></div>
 
         <div class="settings-actions">
           <button class="btn-reset" id="settings-reset">Reset Defaults</button>
@@ -673,6 +1219,8 @@
 
   <!-- Dependencies -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
   <script src="/socket.io/socket.io.js"></script>
 
   <!-- Game Scripts -->

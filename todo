@@ -6,5 +6,9 @@ Add weather. Clouds are randomized with multi-layered perlin noise so that somti
 
 Add a debug menu that appears when pressing "Enter"
 This menu should provide options to change the time of day, speed of the daytime cycle.
- 
-Time should be rendered on client side, but should be universal for multiple players, so it should be controlled by the server. It should be connected to real life time so that 2 hours = one daylight cycle, but that even if the server is off, time keeps running.
+
+
+Let's change the terrain generation to reflext real life more accuratley.
+Instead of using one layer of perlin noise, use multiple layers with different scales and detail to reflect the different geological processes that shape the terrain.
+For the base layer, use a large scale perlin noise to create the overall shape of the terrain, outlining where oceans will be, continents and mountains. (the height difference this layer can cause, is from -1000 meters to +1000 meters, with 0 being sea level)
+The second layer should be a smaller scale perlin noise to add more detail to the terrain, creating hills, valleys and smaller features such as lakes. (The height difference this layer can cause is from -200 meters to +200 meters)

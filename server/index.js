@@ -17,6 +17,10 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+app.get('/assets/character.glb', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'character.glb'));
+});
+
 // Routes
 app.use('/api/auth', authRouter);
 

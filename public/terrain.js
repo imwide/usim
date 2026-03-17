@@ -106,8 +106,18 @@ class TerrainManager {
     this.grassLodFadeDistance = 15;
     this.grassUltraFadeDistance = 4;
     this.grassUltraSpacing = 0.3;
+    this.grassUltraDensityMultiplier = 2.0;
+    this.grassUltraBillboardDistance = 20;
+    this.grassUltraBillboardSpacing = 0.35;
+    this.grassUltraBillboardDensityMultiplier = 0.25;
+    this.grassUltraBillboardFadeDistance = 8;
     this.grassHeight = 1.0;
     this.grassBaseWidth = 0.078;
+    this.grassBillboardWidth = this.grassBaseWidth * 13.4;
+    this.grassBillboardHeight = this.grassHeight * 1.12;
+    this.grassBillboardVariantCount = 10;
+    this.grassBillboardAtlasColumns = 5;
+    this.grassBillboardAtlasInset = 0.035;
     this.grassMaxSlopeDegrees = 50;
     this.grassMaxSlopeY = Math.cos(this.grassMaxSlopeDegrees * Math.PI / 180);
     this.terrainRockTileSize = 6.5;
@@ -164,6 +174,9 @@ class TerrainManager {
 
   setWaterLevel(level) {
     this.waterLevel = level;
+    if (this.terrainUniforms && this.terrainUniforms.uWaterLevel) {
+      this.terrainUniforms.uWaterLevel.value = level;
+    }
   }
 
   setViewDistance(distance) {
@@ -277,6 +290,12 @@ class TerrainManager {
       uRockDetailDistance: { value: this.terrainRockDetailDistance },
       uRockBlendDistance: { value: this.terrainRockBlendDistance },
       uRockBumpStrength: { value: this.terrainRockBumpStrength },
+      uWaterLevel: { value: this.waterLevel },
+      uUnderwaterFadeStart: { value: this.chunkWorldSize * 2.0 },
+      uUnderwaterFadeRange: { value: this.chunkWorldSize * 2.5 },
+      uHorizonColor: { value: new THREE.Color(0x225b8a) },
+      uHorizonDeepColor: { value: new THREE.Color(0x08192a) },
+      uCameraUnderwater: { value: 0 },
     };
 
     this.terrainGrassTextureHigh = this.createTerrainTexture('/assets/textures/terrain/grass-high.jpg');
@@ -302,6 +321,12 @@ class TerrainManager {
       shader.uniforms.uTerrainRockDetailDistance = this.terrainUniforms.uRockDetailDistance;
       shader.uniforms.uTerrainRockBlendDistance = this.terrainUniforms.uRockBlendDistance;
       shader.uniforms.uTerrainRockBumpStrength = this.terrainUniforms.uRockBumpStrength;
+      shader.uniforms.uTerrainWaterLevel = this.terrainUniforms.uWaterLevel;
+      shader.uniforms.uTerrainUnderwaterFadeStart = this.terrainUniforms.uUnderwaterFadeStart;
+      shader.uniforms.uTerrainUnderwaterFadeRange = this.terrainUniforms.uUnderwaterFadeRange;
+      shader.uniforms.uTerrainHorizonColor = this.terrainUniforms.uHorizonColor;
+      shader.uniforms.uTerrainHorizonDeepColor = this.terrainUniforms.uHorizonDeepColor;
+      shader.uniforms.uTerrainCameraUnderwater = this.terrainUniforms.uCameraUnderwater;
       shader.uniforms.uTerrainGrassHigh = { value: this.terrainGrassTextureHigh };
       shader.uniforms.uTerrainGrassMedium = { value: this.terrainGrassTextureMedium };
       shader.uniforms.uTerrainGrassLow = { value: this.terrainGrassTextureLow };
@@ -348,6 +373,12 @@ class TerrainManager {
         uniform float uTerrainRockDetailDistance;
         uniform float uTerrainRockBlendDistance;
         uniform float uTerrainRockBumpStrength;
+        uniform float uTerrainWaterLevel;
+        uniform float uTerrainUnderwaterFadeStart;
+        uniform float uTerrainUnderwaterFadeRange;
+        uniform vec3 uTerrainHorizonColor;
+        uniform vec3 uTerrainHorizonDeepColor;
+        uniform float uTerrainCameraUnderwater;
         varying float vTerrainGrassMask;
         varying vec2 vTerrainWorldXZ;
         varying vec3 vTerrainWorldPos;
@@ -456,11 +487,30 @@ class TerrainManager {
           vec3 grassTint = mix(vec3(0.9, 1.02, 0.84), vec3(1.02, 1.1, 0.94), clamp(terrainLuma, 0.0, 1.0));
           vec3 texturedGrass = grassTex * grassTint * mix(0.88, 1.05, terrainLuma);
           diffuseColor.rgb = mix(diffuseColor.rgb, texturedGrass, effectiveGrassMask);
-        }`
+        }
+
+        float terrainUnderwaterMask = 1.0 - smoothstep(uTerrainWaterLevel - 1.0, uTerrainWaterLevel + 2.5, vTerrainWorldPos.y);
+        float terrainCoastMask = 1.0 - smoothstep(uTerrainWaterLevel + 2.0, uTerrainWaterLevel + 18.0, vTerrainWorldPos.y);
+        float terrainHorizonMask = max(terrainUnderwaterMask, terrainCoastMask * 0.82);
+        float terrainUnderwaterFade = terrainHorizonMask * smoothstep(
+          uTerrainUnderwaterFadeStart,
+          uTerrainUnderwaterFadeStart + max(uTerrainUnderwaterFadeRange, 1.0),
+          terrainDistance
+        );
+        vec3 terrainUnderwaterFadeColor = mix(
+          uTerrainHorizonColor,
+          uTerrainHorizonDeepColor,
+          clamp(uTerrainCameraUnderwater * 0.92 + terrainUnderwaterMask * 0.14, 0.0, 1.0)
+        );
+        diffuseColor.rgb = mix(
+          diffuseColor.rgb,
+          terrainUnderwaterFadeColor,
+          clamp(terrainUnderwaterFade * mix(0.64, 1.0, uTerrainCameraUnderwater), 0.0, 1.0)
+        );`
       );
     };
 
-    material.customProgramCacheKey = () => 'terrain-grass-texture-v3';
+    material.customProgramCacheKey = () => 'terrain-grass-texture-v5';
     return material;
   }
 
@@ -583,15 +633,35 @@ class TerrainManager {
     this.grassUniforms = {
       uTime: { value: 0 },
       uPlayerXZ: { value: new THREE.Vector2(0, 0) },
+      uViewerPos: { value: new THREE.Vector3(0, 0, 0) },
     };
     this.grassUltraCullSphere = new THREE.Sphere();
+    this.grassUltraBillboardCullSphere = new THREE.Sphere();
+    this.grassBillboardTexture = this.createGrassBillboardTexture();
     this.grassUltraGeometry = this.createDetailedGrassBladeGeometry(this.grassHeight, this.grassBaseWidth, 4);
-    this.grassDetailedGeometry = this.createDetailedGrassBladeGeometry(this.grassHeight, this.grassBaseWidth, 3);
-    this.grassSimpleGeometry = this.createSimpleGrassBladeGeometry();
+    this.grassDetailedGeometry = this.createGrassBillboardGeometry(this.grassBillboardHeight, this.grassBillboardWidth);
+    this.grassSimpleGeometry = this.grassDetailedGeometry;
     this.grassUltraMaterial = this.createGrassMaterial(0, this.grassUltraNearDistance, this.grassUltraFadeDistance);
-    this.grassDetailedMaterial = this.createGrassMaterial(0, this.grassHighDetailDistance, this.grassLodFadeDistance);
-    this.grassSimpleMaterial = this.createGrassMaterial(this.grassHighDetailDistance, this.grassRenderDistance, this.grassLodFadeDistance);
+    this.grassUltraBillboardMaterial = this.createGrassBillboardMaterial(
+      0,
+      this.grassUltraBillboardDistance,
+      this.grassUltraBillboardFadeDistance,
+      this.grassUltraBillboardFadeDistance
+    );
+    this.grassDetailedMaterial = this.createGrassBillboardMaterial(
+      this.grassUltraBillboardDistance,
+      this.grassHighDetailDistance,
+      this.grassLodFadeDistance,
+      this.grassUltraBillboardFadeDistance
+    );
+    this.grassSimpleMaterial = this.createGrassBillboardMaterial(
+      this.grassHighDetailDistance,
+      this.grassRenderDistance,
+      this.grassLodFadeDistance,
+      Math.max(6, this.grassLodFadeDistance * 0.55)
+    );
     this.grassUltraMesh = null;
+    this.grassUltraBillboardMesh = null;
     this.grassUltraLastX = Number.NaN;
     this.grassUltraLastZ = Number.NaN;
   }
@@ -1057,50 +1127,14 @@ class TerrainManager {
   }
 
   createDetailedGrassBladeGeometry(height = this.grassHeight, baseWidth = this.grassBaseWidth, segments = 5) {
-    const positions = [];
-    const uvs = [];
-    const bladeFactors = [];
-    const indices = [];
-    const halfBaseWidth = baseWidth * 0.5;
-
-    for (let segment = 0; segment < segments; segment++) {
-      const t = segment / segments;
-      const y = t * height;
-      const halfWidth = halfBaseWidth * Math.max(0.08, 1 - Math.pow(t, 1.15));
-
-      positions.push(-halfWidth, y, 0, halfWidth, y, 0);
-      uvs.push(0, t, 1, t);
-      bladeFactors.push(t, t);
-    }
-
-    const tipIndex = positions.length / 3;
-    positions.push(0, height, 0);
-    uvs.push(0.5, 1);
-    bladeFactors.push(1);
-
-    for (let segment = 0; segment < segments - 1; segment++) {
-      const a = segment * 2;
-      const b = a + 1;
-      const c = a + 2;
-      const d = a + 3;
-
-      indices.push(a, c, b);
-      indices.push(b, c, d);
-    }
-
-    const lastRow = (segments - 1) * 2;
-    indices.push(lastRow, tipIndex, lastRow + 1);
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-    geometry.setAttribute('bladeFactor', new THREE.Float32BufferAttribute(bladeFactors, 1));
-    geometry.setIndex(indices);
-    geometry.computeVertexNormals();
-    return geometry;
+    return this.createTriangleGrassBladeGeometry(height, baseWidth);
   }
 
   createSimpleGrassBladeGeometry(height = this.grassHeight * 0.95, baseWidth = this.grassBaseWidth * 0.82) {
+    return this.createTriangleGrassBladeGeometry(height, baseWidth);
+  }
+
+  createTriangleGrassBladeGeometry(height = this.grassHeight, baseWidth = this.grassBaseWidth) {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute([
       -baseWidth * 0.5, 0, 0,
@@ -1120,6 +1154,279 @@ class TerrainManager {
     geometry.setIndex([0, 2, 1]);
     geometry.computeVertexNormals();
     return geometry;
+  }
+
+  createGrassBillboardGeometry(height = this.grassBillboardHeight, width = this.grassBillboardWidth) {
+    const halfWidth = width * 0.5;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+      -halfWidth, 0, 0,
+      halfWidth, 0, 0,
+      -halfWidth, height, 0,
+      halfWidth, height, 0,
+
+      0, 0, -halfWidth,
+      0, 0, halfWidth,
+      0, height, -halfWidth,
+      0, height, halfWidth,
+    ], 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute([
+      0, 0,
+      1, 0,
+      0, 1,
+      1, 1,
+
+      0, 0,
+      1, 0,
+      0, 1,
+      1, 1,
+    ], 2));
+    geometry.setAttribute('bladeFactor', new THREE.Float32BufferAttribute([
+      0, 0, 1, 1,
+      0, 0, 1, 1,
+    ], 1));
+    geometry.setIndex([
+      0, 2, 1,
+      1, 2, 3,
+      4, 6, 5,
+      5, 6, 7,
+    ]);
+    geometry.computeVertexNormals();
+    return geometry;
+  }
+
+  createGrassBillboardTexture() {
+    const columns = Math.max(1, this.grassBillboardAtlasColumns);
+    const variantCount = Math.max(1, this.grassBillboardVariantCount);
+    const rows = Math.ceil(variantCount / columns);
+    const cellWidth = 148;
+    const cellHeight = 168;
+    const canvas = document.createElement('canvas');
+    canvas.width = columns * cellWidth;
+    canvas.height = rows * cellHeight;
+    const ctx = canvas.getContext('2d');
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (let variant = 0; variant < variantCount; variant++) {
+      const cellX = (variant % columns) * cellWidth;
+      const cellY = Math.floor(variant / columns) * cellHeight;
+      const rootY = cellY + cellHeight - 9;
+      const bladeCount = 14 + Math.floor(this.hash2(variant, variant * 7, 941) * 5);
+
+      for (let layer = 0; layer < 3; layer++) {
+        const layerBladeCount = Math.max(8, bladeCount - (layer === 0 ? 3 : layer === 1 ? 0 : 4));
+
+        for (let blade = 0; blade < layerBladeCount; blade++) {
+          const seedBase = variant * 101 + blade * 17 + layer * 59;
+          const spread = this.clamp(
+            (blade + 0.5 + (this.hash2(seedBase, variant, 942) - 0.5) * 0.78) / layerBladeCount,
+            0.02,
+            0.98
+          );
+          const rootX = cellX + cellWidth * spread;
+          const heightBase = layer === 0 ? 0.3 : layer === 1 ? 0.44 : 0.58;
+          const heightRange = layer === 0 ? 0.12 : layer === 1 ? 0.16 : 0.18;
+          const height = cellHeight * heightBase
+            + this.hash2(seedBase, variant, 943) * cellHeight * heightRange;
+          const tipLean = (this.hash2(seedBase, variant, 944) - 0.5) * cellWidth * (layer === 0 ? 0.24 : layer === 1 ? 0.34 : 0.42);
+          const controlLean = (this.hash2(seedBase, variant, 945) - 0.5) * cellWidth * (layer === 0 ? 0.18 : layer === 1 ? 0.26 : 0.32);
+          const lineWidth = (layer === 0 ? 2.2 : layer === 1 ? 3.0 : 3.7)
+            + this.hash2(seedBase, variant, 946) * (layer === 0 ? 1.2 : layer === 1 ? 1.6 : 2.0);
+          const bottomShade = 0.32 + this.hash2(seedBase, variant, 947) * 0.12;
+          const midShade = 0.48 + this.hash2(seedBase, variant, 948) * 0.14;
+          const tipShade = 0.66 + this.hash2(seedBase, variant, 949) * 0.16;
+          const gradient = ctx.createLinearGradient(rootX, rootY, rootX + tipLean, rootY - height);
+          gradient.addColorStop(0, `rgba(${Math.round(58 + bottomShade * 28)}, ${Math.round(96 + bottomShade * 42)}, ${Math.round(36 + bottomShade * 18)}, ${layer === 0 ? 0.18 : layer === 1 ? 0.42 : 0.68})`);
+          gradient.addColorStop(0.55, `rgba(${Math.round(84 + midShade * 26)}, ${Math.round(132 + midShade * 40)}, ${Math.round(54 + midShade * 18)}, ${layer === 0 ? 0.24 : layer === 1 ? 0.52 : 0.74})`);
+          gradient.addColorStop(1, `rgba(${Math.round(118 + tipShade * 24)}, ${Math.round(164 + tipShade * 34)}, ${Math.round(82 + tipShade * 16)}, ${layer === 0 ? 0.2 : layer === 1 ? 0.44 : 0.66})`);
+
+          ctx.strokeStyle = gradient;
+          ctx.lineWidth = lineWidth;
+          ctx.beginPath();
+          ctx.moveTo(rootX, rootY);
+          ctx.quadraticCurveTo(
+            rootX + controlLean,
+            rootY - height * (0.45 + this.hash2(seedBase, variant, 950) * 0.16),
+            rootX + tipLean,
+            rootY - height
+          );
+          ctx.stroke();
+
+          if (layer >= 1) {
+            ctx.strokeStyle = `rgba(226, 241, 196, ${0.06 + this.hash2(seedBase, variant, 951) * (layer === 1 ? 0.04 : 0.06)})`;
+            ctx.lineWidth = Math.max(1.2, lineWidth * 0.22);
+            ctx.beginPath();
+            ctx.moveTo(rootX + lineWidth * 0.08, rootY - 3);
+            ctx.quadraticCurveTo(
+              rootX + controlLean * 0.78,
+              rootY - height * 0.46,
+              rootX + tipLean * 0.82,
+              rootY - height + lineWidth * 0.2
+            );
+            ctx.stroke();
+          }
+        }
+      }
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.encoding = THREE.sRGBEncoding;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  createGrassBillboardMaterial(
+    visibleMinDistance = 0,
+    visibleMaxDistance = Infinity,
+    fadeDistance = this.grassLodFadeDistance,
+    fadeInDistance = fadeDistance
+  ) {
+    const material = new THREE.MeshLambertMaterial({
+      color: 0xffffff,
+      map: this.grassBillboardTexture,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      depthTest: true,
+      fog: true,
+      transparent: true,
+      alphaTest: 0.2,
+    });
+
+    material.userData.isGrassBillboard = true;
+    material.userData.grassLodUniforms = {
+      uGrassVisibleMin: { value: visibleMinDistance },
+      uGrassVisibleMax: { value: visibleMaxDistance },
+      uGrassFadeDistance: { value: fadeDistance },
+      uGrassFadeInDistance: { value: fadeInDistance },
+      uGrassAtlasGrid: {
+        value: new THREE.Vector2(
+          this.grassBillboardAtlasColumns,
+          Math.ceil(this.grassBillboardVariantCount / this.grassBillboardAtlasColumns)
+        ),
+      },
+      uGrassAtlasInset: { value: this.grassBillboardAtlasInset },
+    };
+
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uGrassTime = this.grassUniforms.uTime;
+      shader.uniforms.uGrassViewerPos = this.grassUniforms.uViewerPos;
+      shader.uniforms.uGrassVisibleMin = material.userData.grassLodUniforms.uGrassVisibleMin;
+      shader.uniforms.uGrassVisibleMax = material.userData.grassLodUniforms.uGrassVisibleMax;
+      shader.uniforms.uGrassFadeDistance = material.userData.grassLodUniforms.uGrassFadeDistance;
+      shader.uniforms.uGrassFadeInDistance = material.userData.grassLodUniforms.uGrassFadeInDistance;
+      shader.uniforms.uGrassAtlasGrid = material.userData.grassLodUniforms.uGrassAtlasGrid;
+      shader.uniforms.uGrassAtlasInset = material.userData.grassLodUniforms.uGrassAtlasInset;
+
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <common>',
+        `#include <common>
+        uniform float uGrassTime;
+        uniform vec3 uGrassViewerPos;
+        uniform float uGrassVisibleMin;
+        uniform float uGrassVisibleMax;
+        uniform float uGrassFadeDistance;
+        uniform float uGrassFadeInDistance;
+        uniform vec2 uGrassAtlasGrid;
+        uniform float uGrassAtlasInset;
+        attribute float bladeFactor;
+        attribute float instanceAtlasIndex;
+        attribute float instanceAtlasFlip;
+        varying float vBladeFactor;
+        varying float vGrassDistanceFade;
+        varying float vGrassVisibility;
+        varying vec3 vGrassTint;
+
+        float hash12(vec2 p) {
+          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }`
+      );
+
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <uv_vertex>',
+        `#include <uv_vertex>
+        #ifdef USE_MAP
+          vec2 grassAtlasUv = uv;
+          if (instanceAtlasFlip > 0.5) {
+            grassAtlasUv.x = 1.0 - grassAtlasUv.x;
+          }
+          grassAtlasUv = mix(vec2(uGrassAtlasInset), vec2(1.0 - uGrassAtlasInset), grassAtlasUv);
+          float atlasIndex = floor(instanceAtlasIndex + 0.5);
+          vec2 atlasScale = vec2(1.0 / uGrassAtlasGrid.x, 1.0 / uGrassAtlasGrid.y);
+          vec2 atlasOffset = vec2(mod(atlasIndex, uGrassAtlasGrid.x), floor(atlasIndex / uGrassAtlasGrid.x)) * atlasScale;
+          vUv = atlasOffset + grassAtlasUv * atlasScale;
+        #endif`
+      );
+
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vBladeFactor = bladeFactor;
+
+        vec3 grassWorldRoot = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        #ifdef USE_INSTANCING
+          grassWorldRoot = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        #endif
+
+        float grassPlayerDist = distance(grassWorldRoot, uGrassViewerPos);
+        float fadeIn = uGrassVisibleMin <= 0.0
+          ? 1.0
+          : smoothstep(uGrassVisibleMin - uGrassFadeInDistance, uGrassVisibleMin, grassPlayerDist);
+        float fadeOut = uGrassVisibleMax > 1000000.0
+          ? 1.0
+          : 1.0 - smoothstep(uGrassVisibleMax - uGrassFadeDistance, uGrassVisibleMax, grassPlayerDist);
+        vGrassDistanceFade = uGrassVisibleMax > 1000000.0
+          ? 0.0
+          : clamp((grassPlayerDist - uGrassVisibleMin) / max(1.0, uGrassVisibleMax - uGrassVisibleMin), 0.0, 1.0);
+        vGrassVisibility = clamp(fadeIn * fadeOut, 0.0, 1.0);
+
+        float primaryWave = sin(uGrassTime * 1.32 + grassWorldRoot.x * 0.028 + grassWorldRoot.z * 0.024);
+        float secondaryWave = sin(uGrassTime * 2.18 + grassWorldRoot.x * 0.093 - grassWorldRoot.z * 0.074);
+        float gust = sin(uGrassTime * 0.41 + grassWorldRoot.x * 0.012 - grassWorldRoot.z * 0.009) * 0.5 + 0.5;
+        float bendFactor = bladeFactor * bladeFactor;
+        float bendStrength = (0.035 + gust * 0.08) * bendFactor;
+        float sway = (primaryWave * 0.7 + secondaryWave * 0.3) * bendStrength;
+
+        transformed.x += sway;
+
+        float tintNoise = hash12(grassWorldRoot.xz * 0.063);
+        vGrassTint = mix(vec3(0.92, 0.97, 0.88), vec3(1.02, 1.05, 0.95), tintNoise);`
+      );
+
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <common>',
+        `#include <common>
+        varying float vBladeFactor;
+        varying float vGrassDistanceFade;
+        varying float vGrassVisibility;
+        varying vec3 vGrassTint;`
+      );
+
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+        vec3 bladeGradient = mix(vec3(0.88, 0.94, 0.82), vec3(1.02, 1.07, 0.96), smoothstep(0.0, 1.0, vBladeFactor));
+        vec3 grassColor = diffuseColor.rgb * bladeGradient * vGrassTint;
+        float grassLuma = dot(grassColor, vec3(0.299, 0.587, 0.114));
+        grassColor = mix(grassColor, vec3(grassLuma), 0.14 + vGrassDistanceFade * 0.28);
+        grassColor = mix(grassColor, vec3(1.0), 0.04 + vGrassDistanceFade * 0.16);
+        diffuseColor.rgb = grassColor * mix(0.62, 1.0, vGrassVisibility);
+        diffuseColor.a *= vGrassVisibility;
+        if (diffuseColor.a < 0.01) discard;`
+      );
+    };
+
+    material.customProgramCacheKey = () => (
+      `terrain-grass-billboard-v4-${visibleMinDistance}-${visibleMaxDistance}-${fadeDistance}-${fadeInDistance}`
+    );
+
+    return material;
   }
 
   createGrassMaterial(visibleMinDistance = 0, visibleMaxDistance = Infinity, fadeDistance = this.grassLodFadeDistance) {
@@ -1169,9 +1476,7 @@ class TerrainManager {
 
       shader.vertexShader = shader.vertexShader.replace(
         '#include <beginnormal_vertex>',
-        `#include <beginnormal_vertex>
-        float grassNormalBend = bladeFactor * 0.55;
-        objectNormal = normalize(objectNormal + vec3(grassNormalBend * 0.45, 0.0, grassNormalBend * 0.08));`
+        `#include <beginnormal_vertex>`
       );
 
       shader.vertexShader = shader.vertexShader.replace(
@@ -1197,15 +1502,13 @@ class TerrainManager {
         float secondaryWave = sin(uGrassTime * 2.85 + grassWorldRoot.x * 0.121 - grassWorldRoot.z * 0.097);
         float gust = sin(uGrassTime * 0.47 + grassWorldRoot.x * 0.013 - grassWorldRoot.z * 0.011) * 0.5 + 0.5;
         float bendFactor = bladeFactor * bladeFactor;
-        float bendStrength = (0.06 + gust * 0.16) * bendFactor;
+        float bendStrength = (0.045 + gust * 0.12) * bendFactor;
         float sway = (primaryWave * 0.72 + secondaryWave * 0.28) * bendStrength;
 
         transformed.x += sway;
-        transformed.z += secondaryWave * bendStrength * 0.18;
-        transformed.y += abs(primaryWave) * bendFactor * 0.035;
 
         float tintNoise = hash12(grassWorldRoot.xz * 0.071);
-        vGrassTint = mix(vec3(0.82, 0.90, 0.78), vec3(1.04, 1.08, 0.92), tintNoise);`
+        vGrassTint = mix(vec3(0.90, 0.96, 0.88), vec3(1.02, 1.05, 0.95), tintNoise);`
       );
 
       shader.fragmentShader = shader.fragmentShader.replace(
@@ -1219,14 +1522,14 @@ class TerrainManager {
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <color_fragment>',
         `#include <color_fragment>
-        vec3 bladeGradient = mix(vec3(0.16, 0.30, 0.08), vec3(0.41, 0.64, 0.18), smoothstep(0.0, 1.0, vBladeFactor));
+        vec3 bladeGradient = mix(vec3(0.26, 0.40, 0.14), vec3(0.50, 0.68, 0.28), smoothstep(0.0, 1.0, vBladeFactor));
         diffuseColor.rgb *= bladeGradient * vGrassTint * mix(0.35, 1.0, vGrassVisibility);
         diffuseColor.a *= vGrassVisibility;
         if (diffuseColor.a < 0.01) discard;`
       );
     };
 
-    material.customProgramCacheKey = () => `terrain-grass-wind-v6-${visibleMinDistance}-${visibleMaxDistance}-${fadeDistance}`;
+    material.customProgramCacheKey = () => `terrain-grass-wind-v8-${visibleMinDistance}-${visibleMaxDistance}-${fadeDistance}`;
     return material;
   }
 
@@ -1309,12 +1612,16 @@ class TerrainManager {
 
     const size = chunk.gridSize || this.chunkSize;
     const step = chunk.step || (this.chunkWorldSize / (size - 1));
+    const isBillboardLod = lod === 'billboard-high' || lod === 'billboard-low';
+    const isHighLod = lod === 'high' || lod === 'billboard-high';
     const quadStride = Math.max(1, Math.floor(spacing / Math.max(step, 0.01)));
-    const samplesPerQuadAxis = lod === 'high'
-      ? Math.min(3, Math.max(1, Math.ceil(step / Math.max(spacing, step / 3))))
-      : Math.min(2, Math.max(1, Math.ceil(step / Math.max(spacing, step / 2))));
+    const samplesPerQuadAxis = isBillboardLod
+      ? 1
+      : isHighLod
+        ? Math.min(3, Math.max(1, Math.ceil(step / Math.max(spacing, step / 3))))
+        : Math.min(2, Math.max(1, Math.ceil(step / Math.max(spacing, step / 2))));
     const subCellSize = step / samplesPerQuadAxis;
-    const jitterAmount = subCellSize * (lod === 'high' ? 0.82 : 0.65);
+    const jitterAmount = subCellSize * (isBillboardLod ? 0.92 : isHighLod ? 0.82 : 0.65);
     const originX = chunk.cx * this.chunkWorldSize;
     const originZ = chunk.cz * this.chunkWorldSize;
     const samples = [];
@@ -1326,8 +1633,8 @@ class TerrainManager {
 
         for (let subZ = 0; subZ < samplesPerQuadAxis; subZ++) {
           for (let subX = 0; subX < samplesPerQuadAxis; subX++) {
-            const seedX = ix * 17 + subX * 31 + (lod === 'high' ? 11 : 101);
-            const seedZ = iz * 19 + subZ * 37 + (lod === 'high' ? 13 : 103);
+            const seedX = ix * 17 + subX * 31 + (isHighLod ? 11 : 101);
+            const seedZ = iz * 19 + subZ * 37 + (isHighLod ? 13 : 103);
             const offsetX = (this.hash2(chunk.cx * 4096 + seedX, chunk.cz * 4096 + seedZ, 901) - 0.5) * jitterAmount;
             const offsetZ = (this.hash2(chunk.cx * 4096 + seedX, chunk.cz * 4096 + seedZ, 902) - 0.5) * jitterAmount;
             const wx = this.clamp(
@@ -1346,11 +1653,16 @@ class TerrainManager {
 
             if (!spawnData) continue;
 
-            const heightScale = (lod === 'high' ? 0.82 : 0.72)
-              + this.hash2(wx, wz, 903) * (lod === 'high' ? 0.42 : 0.22)
-              + spawnData.lushness * (lod === 'high' ? 0.32 : 0.12);
-            const widthScale = (lod === 'high' ? 0.72 : 0.66)
-              + this.hash2(wx, wz, 904) * (lod === 'high' ? 0.34 : 0.18);
+            const coverage = spawnData.coverage || 0;
+            const heightScale = isBillboardLod
+              ? 0.88 + this.hash2(wx, wz, 903) * 0.44 + spawnData.lushness * 0.3
+              : (isHighLod ? 0.82 : 0.72)
+                + this.hash2(wx, wz, 903) * (isHighLod ? 0.42 : 0.22)
+                + spawnData.lushness * (isHighLod ? 0.32 : 0.12);
+            const widthScale = isBillboardLod
+              ? 0.84 + this.hash2(wx, wz, 904) * 0.48 + coverage * 0.26
+              : (isHighLod ? 0.72 : 0.66)
+                + this.hash2(wx, wz, 904) * (isHighLod ? 0.34 : 0.18);
 
             samples.push({
               x: wx,
@@ -1361,6 +1673,11 @@ class TerrainManager {
               rotationY: this.hash2(wx, wz, 905) * Math.PI * 2,
               leanX: (this.hash2(wx, wz, 906) - 0.5) * 0.14,
               leanZ: (this.hash2(wx, wz, 907) - 0.5) * 0.14,
+              atlasIndex: Math.min(
+                this.grassBillboardVariantCount - 1,
+                Math.floor(this.hash2(wx * 0.41, wz * 0.41, 908) * this.grassBillboardVariantCount)
+              ),
+              atlasFlip: this.hash2(wx * 0.53, wz * 0.53, 909) > 0.5 ? 1 : 0,
             });
           }
         }
@@ -1370,9 +1687,20 @@ class TerrainManager {
     return samples;
   }
 
+  getUltraNearGrassSamplesPerQuadAxis(spacing, densityMultiplier = 1) {
+    const terrainStep = this.chunkWorldSize / (this.chunkSize - 1);
+    return Math.max(
+      1,
+      Math.ceil((terrainStep / Math.max(0.01, spacing)) * Math.sqrt(Math.max(0, densityMultiplier) || 1))
+    );
+  }
+
   createUltraNearGrassSamples(playerX, playerZ) {
     const terrainStep = this.chunkWorldSize / (this.chunkSize - 1);
-    const samplesPerQuadAxis = Math.ceil(terrainStep / this.grassUltraSpacing);
+    const samplesPerQuadAxis = this.getUltraNearGrassSamplesPerQuadAxis(
+      this.grassUltraSpacing,
+      this.grassUltraDensityMultiplier
+    );
     const subCellSize = terrainStep / samplesPerQuadAxis;
     const jitterAmount = subCellSize * 0.58;
     const radius = this.grassUltraNearDistance;
@@ -1430,14 +1758,99 @@ class TerrainManager {
     return samples;
   }
 
-  removeUltraNearGrass() {
-    if (!this.grassUltraMesh) return;
+  createUltraNearBillboardSamples(playerX, playerZ) {
+    const terrainStep = this.chunkWorldSize / (this.chunkSize - 1);
+    const samplesPerQuadAxis = this.getUltraNearGrassSamplesPerQuadAxis(
+      this.grassUltraBillboardSpacing,
+      this.grassUltraBillboardDensityMultiplier
+    );
+    const subCellSize = terrainStep / samplesPerQuadAxis;
+    const jitterAmount = subCellSize * 0.64;
+    const radius = this.grassUltraBillboardDistance;
+    const radiusSq = radius * radius;
+    const startX = Math.floor((playerX - radius) / subCellSize);
+    const endX = Math.ceil((playerX + radius) / subCellSize);
+    const startZ = Math.floor((playerZ - radius) / subCellSize);
+    const endZ = Math.ceil((playerZ + radius) / subCellSize);
+    const samples = [];
 
-    this.scene.remove(this.grassUltraMesh);
-    this.grassUltraMesh = null;
+    for (let gridZ = startZ; gridZ <= endZ; gridZ++) {
+      for (let gridX = startX; gridX <= endX; gridX++) {
+        const baseX = (gridX + 0.5) * subCellSize;
+        const baseZ = (gridZ + 0.5) * subCellSize;
+        const offsetX = (this.hash2(gridX, gridZ, 961) - 0.5) * jitterAmount;
+        const offsetZ = (this.hash2(gridX, gridZ, 962) - 0.5) * jitterAmount;
+        const worldX = baseX + offsetX;
+        const worldZ = baseZ + offsetZ;
+        const dx = worldX - playerX;
+        const dz = worldZ - playerZ;
+        const distSq = dx * dx + dz * dz;
+        const dist = Math.sqrt(distSq);
+
+        if (distSq > radiusSq) continue;
+
+        const height = this.getHeight(worldX, worldZ);
+        const terrainColor = this.getTerrainColor(height, worldX, worldZ);
+        const spawnData = this.getGrassSpawnData(worldX, worldZ, height, terrainColor, 0.15);
+
+        if (!spawnData) continue;
+
+        const coverage = spawnData.coverage || 0;
+        const billboardCoverageChance = this.smoothstep(0.08, 0.58, coverage);
+        const edgeDensityFade = 1 - this.smoothstep(
+          Math.max(0, radius - this.grassUltraBillboardFadeDistance),
+          radius,
+          dist
+        );
+        const densityChance = billboardCoverageChance * this.lerp(0.15, 1.0, edgeDensityFade);
+        const billboardCoverageRoll = this.hash2(worldX * 0.33, worldZ * 0.33, 963);
+        if (billboardCoverageRoll > densityChance) continue;
+
+        const heightScale = 0.9
+          + this.hash2(worldX, worldZ, 964) * 0.38
+          + spawnData.lushness * 0.24
+          + coverage * 0.12;
+        const widthScale = 0.86
+          + this.hash2(worldX, worldZ, 965) * 0.4
+          + coverage * 0.18;
+
+        samples.push({
+          x: worldX,
+          y: spawnData.height + 0.035,
+          z: worldZ,
+          scaleY: heightScale,
+          scaleXZ: widthScale,
+          rotationY: this.hash2(worldX, worldZ, 966) * Math.PI * 2,
+          leanX: (this.hash2(worldX, worldZ, 967) - 0.5) * 0.06,
+          leanZ: (this.hash2(worldX, worldZ, 968) - 0.5) * 0.06,
+          atlasIndex: Math.min(
+            this.grassBillboardVariantCount - 1,
+            Math.floor(this.hash2(worldX * 0.41, worldZ * 0.41, 969) * this.grassBillboardVariantCount)
+          ),
+          atlasFlip: this.hash2(worldX * 0.53, worldZ * 0.53, 970) > 0.5 ? 1 : 0,
+        });
+      }
+    }
+
+    return samples;
   }
 
-  updateUltraNearGrass(playerX, playerZ, force = false) {
+  removeUltraNearGrass() {
+    if (this.grassUltraMesh) {
+      this.scene.remove(this.grassUltraMesh);
+      this.grassUltraMesh = null;
+    }
+
+    if (this.grassUltraBillboardMesh) {
+      this.scene.remove(this.grassUltraBillboardMesh);
+      if (this.grassUltraBillboardMesh.userData && this.grassUltraBillboardMesh.userData.disposeGeometry && this.grassUltraBillboardMesh.geometry) {
+        this.grassUltraBillboardMesh.geometry.dispose();
+      }
+      this.grassUltraBillboardMesh = null;
+    }
+  }
+
+  updateUltraNearGrass(playerX, playerY, playerZ, force = false) {
     const now = performance.now();
     const movedX = playerX - this.grassUltraLastX;
     const movedZ = playerZ - this.grassUltraLastZ;
@@ -1445,8 +1858,19 @@ class TerrainManager {
     const rebuildDistanceSq = adaptiveRebuildDistance * adaptiveRebuildDistance;
     const movedSq = movedX * movedX + movedZ * movedZ;
     const withinCooldown = (now - this.lastUltraGrassRebuildTime) < this.grassUltraRebuildMinIntervalMs;
+    const localGroundHeight = this.getHeight(playerX, playerZ) + this.grassBillboardHeight * 0.5;
+    const verticalDist = Math.abs(playerY - localGroundHeight);
+    const maxVerticalRange = this.grassUltraBillboardDistance + this.grassBillboardHeight + this.grassUltraBillboardFadeDistance;
 
-    if (!force && this.grassUltraMesh) {
+    if (!force && verticalDist > maxVerticalRange) {
+      this.removeUltraNearGrass();
+      this.grassUltraLastX = playerX;
+      this.grassUltraLastZ = playerZ;
+      this.lastUltraGrassRebuildTime = now;
+      return;
+    }
+
+    if (!force && this.grassUltraBillboardMesh) {
       if (movedSq < rebuildDistanceSq) {
         return;
       }
@@ -1462,25 +1886,29 @@ class TerrainManager {
 
     this.removeUltraNearGrass();
 
-    const ultraSamples = this.createUltraNearGrassSamples(playerX, playerZ);
-    this.grassUltraMesh = this.createGrassInstancedMesh(
-      ultraSamples,
-      this.grassUltraGeometry,
-      this.grassUltraMaterial
+    const ultraBillboardSamples = this.createUltraNearBillboardSamples(playerX, playerZ);
+    this.grassUltraBillboardMesh = this.createGrassInstancedMesh(
+      ultraBillboardSamples,
+      this.grassDetailedGeometry,
+      this.grassUltraBillboardMaterial
     );
 
-    if (this.grassUltraMesh) {
-      this.grassUltraMesh.renderOrder = 32;
-      this.scene.add(this.grassUltraMesh);
+    if (this.grassUltraBillboardMesh) {
+      this.grassUltraBillboardMesh.renderOrder = 32;
+      this.scene.add(this.grassUltraBillboardMesh);
     }
   }
 
   createGrassInstancedMesh(samples, geometry, material) {
     if (!samples.length) return null;
 
-    const mesh = new THREE.InstancedMesh(geometry, material, samples.length);
+    const isBillboard = !!(material && material.userData && material.userData.isGrassBillboard);
+    const meshGeometry = isBillboard ? geometry.clone() : geometry;
+    const mesh = new THREE.InstancedMesh(meshGeometry, material, samples.length);
     mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
     const dummy = new THREE.Object3D();
+    const atlasIndices = isBillboard ? new Float32Array(samples.length) : null;
+    const atlasFlips = isBillboard ? new Float32Array(samples.length) : null;
 
     for (let index = 0; index < samples.length; index++) {
       const sample = samples[index];
@@ -1489,6 +1917,17 @@ class TerrainManager {
       dummy.scale.set(sample.scaleXZ, sample.scaleY, sample.scaleXZ);
       dummy.updateMatrix();
       mesh.setMatrixAt(index, dummy.matrix);
+
+      if (isBillboard) {
+        atlasIndices[index] = Number.isFinite(sample.atlasIndex) ? sample.atlasIndex : 0;
+        atlasFlips[index] = sample.atlasFlip ? 1 : 0;
+      }
+    }
+
+    if (isBillboard) {
+      meshGeometry.setAttribute('instanceAtlasIndex', new THREE.InstancedBufferAttribute(atlasIndices, 1));
+      meshGeometry.setAttribute('instanceAtlasFlip', new THREE.InstancedBufferAttribute(atlasFlips, 1));
+      mesh.userData.disposeGeometry = true;
     }
 
     mesh.instanceMatrix.needsUpdate = true;
@@ -1535,7 +1974,7 @@ class TerrainManager {
     if (lodKey === 'high') {
       if (chunk.grassHighReady) return false;
 
-      const detailedSamples = this.createGrassSamplesForChunk(chunk, this.grassDenseSpacing, 0.22, 'high');
+      const detailedSamples = this.createGrassSamplesForChunk(chunk, this.grassDenseSpacing, 0.22, 'billboard-high');
       chunk.grassHighMesh = this.createGrassInstancedMesh(
         detailedSamples,
         this.grassDetailedGeometry,
@@ -1554,7 +1993,7 @@ class TerrainManager {
     if (lodKey === 'low') {
       if (chunk.grassLowReady) return false;
 
-      const simpleSamples = this.createGrassSamplesForChunk(chunk, this.grassSparseSpacing, 0.14, 'low');
+      const simpleSamples = this.createGrassSamplesForChunk(chunk, this.grassSparseSpacing, 0.14, 'billboard-low');
       chunk.grassLowMesh = this.createGrassInstancedMesh(
         simpleSamples,
         this.grassSimpleGeometry,
@@ -1578,11 +2017,17 @@ class TerrainManager {
 
     if (chunk.grassHighMesh) {
       this.scene.remove(chunk.grassHighMesh);
+      if (chunk.grassHighMesh.userData && chunk.grassHighMesh.userData.disposeGeometry && chunk.grassHighMesh.geometry) {
+        chunk.grassHighMesh.geometry.dispose();
+      }
       chunk.grassHighMesh = null;
     }
 
     if (chunk.grassLowMesh) {
       this.scene.remove(chunk.grassLowMesh);
+      if (chunk.grassLowMesh.userData && chunk.grassLowMesh.userData.disposeGeometry && chunk.grassLowMesh.geometry) {
+        chunk.grassLowMesh.geometry.dispose();
+      }
       chunk.grassLowMesh = null;
     }
 
@@ -1620,7 +2065,41 @@ class TerrainManager {
     return dx * dx + dz * dz;
   }
 
-  updateGrassChunkLod(chunk, playerX, playerZ, inFrustum = true) {
+  getBoundsMinDistanceSq(bounds, worldX, worldY, worldZ) {
+    if (!bounds) return 0;
+
+    const nearestX = this.clamp(worldX, bounds.min.x, bounds.max.x);
+    const nearestY = this.clamp(worldY, bounds.min.y, bounds.max.y);
+    const nearestZ = this.clamp(worldZ, bounds.min.z, bounds.max.z);
+    const dx = nearestX - worldX;
+    const dy = nearestY - worldY;
+    const dz = nearestZ - worldZ;
+    return dx * dx + dy * dy + dz * dz;
+  }
+
+  getGrassChunkMinDistanceSq(chunk, worldX, worldY, worldZ) {
+    if (!chunk) return Infinity;
+    if (chunk.cullBounds) {
+      return this.getBoundsMinDistanceSq(chunk.cullBounds, worldX, worldY, worldZ);
+    }
+    return this.getChunkMinDistanceSq(chunk.cx, chunk.cz, worldX, worldZ);
+  }
+
+  getGrassViewerPosition(playerX, playerZ, camera = null) {
+    const viewerX = camera && camera.position && Number.isFinite(camera.position.x)
+      ? camera.position.x
+      : playerX;
+    const viewerZ = camera && camera.position && Number.isFinite(camera.position.z)
+      ? camera.position.z
+      : playerZ;
+    const viewerY = camera && camera.position && Number.isFinite(camera.position.y)
+      ? camera.position.y
+      : this.getHeight(viewerX, viewerZ) + this.grassBillboardHeight;
+
+    return { x: viewerX, y: viewerY, z: viewerZ };
+  }
+
+  updateGrassChunkLod(chunk, playerX, playerY, playerZ, inFrustum = true) {
     if (!chunk || (!chunk.grassHighMesh && !chunk.grassLowMesh)) return;
 
     if (!this.grassBladesEnabled) {
@@ -1629,7 +2108,7 @@ class TerrainManager {
       return;
     }
 
-    const distSq = this.getChunkMinDistanceSq(chunk.cx, chunk.cz, playerX, playerZ);
+    const distSq = this.getGrassChunkMinDistanceSq(chunk, playerX, playerY, playerZ);
     const maxDistanceWithFade = this.grassRenderDistance + this.grassLodFadeDistance;
     const highDistanceWithFade = this.grassHighDetailDistance + this.grassLodFadeDistance;
     const maxDistSq = maxDistanceWithFade * maxDistanceWithFade;
@@ -1646,21 +2125,24 @@ class TerrainManager {
     }
   }
 
-  updateUltraNearGrassVisibility(playerX, playerZ, frustum) {
-    if (!this.grassUltraMesh) return;
+  updateUltraNearGrassVisibility(playerX, playerY, playerZ, frustum) {
+    if (!this.grassUltraBillboardMesh) return;
 
     if (!frustum) {
-      this.grassUltraMesh.visible = true;
+      this.grassUltraBillboardMesh.visible = true;
       return;
     }
 
-    this.grassUltraCullSphere.center.set(
+    const playerHeight = this.getHeight(playerX, playerZ);
+    this.grassUltraBillboardCullSphere.center.set(
       playerX,
-      this.getHeight(playerX, playerZ) + this.grassHeight * 0.5,
+      playerHeight + this.grassBillboardHeight * 0.5,
       playerZ
     );
-    this.grassUltraCullSphere.radius = this.grassUltraNearDistance + this.grassHeight + 1;
-    this.grassUltraMesh.visible = frustum.intersectsSphere(this.grassUltraCullSphere);
+    this.grassUltraBillboardCullSphere.radius = this.grassUltraBillboardDistance + this.grassBillboardWidth + 1;
+    const verticalRange = playerY - (playerHeight + this.grassBillboardHeight * 0.5);
+    const withinDistance = Math.abs(verticalRange) <= this.grassUltraBillboardCullSphere.radius;
+    this.grassUltraBillboardMesh.visible = withinDistance && frustum.intersectsSphere(this.grassUltraBillboardCullSphere);
   }
 
   getCityKey(cellX, cellZ) {
@@ -2638,6 +3120,7 @@ class TerrainManager {
     const lowGrassBuildDistanceSq = lowGrassBuildDistance * lowGrassBuildDistance;
     const highGrassBuildDistanceSq = highGrassBuildDistance * highGrassBuildDistance;
     const frustum = this.updateCameraFrustum(camera);
+    const grassViewer = this.getGrassViewerPosition(playerX, playerZ, camera);
 
     this.updatePlayerMotionEstimate(playerX, playerZ);
     const suspendGrassStreaming = this.grassStreamingSuspended
@@ -2646,7 +3129,8 @@ class TerrainManager {
     this.setGrassStreamingSuspended(suspendGrassStreaming);
     const grassBladesActive = this.grassBladesEnabled && !this.grassStreamingSuspended;
     this.grassUniforms.uTime.value = performance.now() * 0.001;
-    this.grassUniforms.uPlayerXZ.value.set(playerX, playerZ);
+    this.grassUniforms.uPlayerXZ.value.set(grassViewer.x, grassViewer.z);
+    this.grassUniforms.uViewerPos.value.set(grassViewer.x, grassViewer.y, grassViewer.z);
     this.terrainUniforms.uPlayerXZ.value.set(playerX, playerZ);
 
     const roadMinX = playerX - preloadRadius;
@@ -2676,6 +3160,9 @@ class TerrainManager {
         const chunkLodReady = !!existingChunk
           && existingChunk.lodLevel === desiredLodLevel
           && existingChunk.lodSettingsVersion === this.lodSettingsVersion;
+        const grassChunkDistSq = chunkLodReady && existingChunk
+          ? this.getGrassChunkMinDistanceSq(existingChunk, grassViewer.x, grassViewer.y, grassViewer.z)
+          : Infinity;
         needed.add(key);
 
         if (forceLoad) {
@@ -2696,11 +3183,11 @@ class TerrainManager {
           }
         }
 
-        if (grassBladesActive && chunkLodReady && chunkDistSq <= lowGrassBuildDistanceSq) {
+        if (grassBladesActive && chunkLodReady && grassChunkDistSq <= lowGrassBuildDistanceSq) {
           grassBuildKeys.add(this.getGrassQueueKey(key, 'low'));
         }
 
-        if (grassBladesActive && chunkLodReady && chunkDistSq <= highGrassBuildDistanceSq) {
+        if (grassBladesActive && chunkLodReady && grassChunkDistSq <= highGrassBuildDistanceSq) {
           grassBuildKeys.add(this.getGrassQueueKey(key, 'high'));
         }
       }
@@ -2724,6 +3211,7 @@ class TerrainManager {
 
       const inFrustum = this.updateChunkFrustumVisibility(chunk, frustum);
       const chunkDistSq = this.getChunkMinDistanceSq(chunk.cx, chunk.cz, playerX, playerZ);
+      const grassChunkDistSq = this.getGrassChunkMinDistanceSq(chunk, grassViewer.x, grassViewer.y, grassViewer.z);
       const desiredChunkLod = this.getDesiredLodLevel(Math.sqrt(chunkDistSq), chunk.lodLevel);
       const chunkNeedsLodRefresh = chunk.lodLevel !== desiredChunkLod || chunk.lodSettingsVersion !== this.lodSettingsVersion;
 
@@ -2739,27 +3227,27 @@ class TerrainManager {
         continue;
       }
 
-      if (chunkDistSq <= lowGrassBuildDistanceSq && !chunk.grassLowReady) {
+      if (grassChunkDistSq <= lowGrassBuildDistanceSq && !chunk.grassLowReady) {
         if (forceLoad) {
           if (this.buildGrassChunkLod(chunk, 'low')) {
             refreshedGrassChunks.push(chunk);
           }
         } else {
-          this.queueGrassChunkBuild(chunk, 'low', chunkDistSq + 0.25);
+          this.queueGrassChunkBuild(chunk, 'low', grassChunkDistSq + 0.25);
         }
       }
 
-      if (chunkDistSq <= highGrassBuildDistanceSq && !chunk.grassHighReady) {
+      if (grassChunkDistSq <= highGrassBuildDistanceSq && !chunk.grassHighReady) {
         if (forceLoad) {
           if (this.buildGrassChunkLod(chunk, 'high')) {
             refreshedGrassChunks.push(chunk);
           }
         } else {
-          this.queueGrassChunkBuild(chunk, 'high', Math.max(0, chunkDistSq - 0.25));
+          this.queueGrassChunkBuild(chunk, 'high', Math.max(0, grassChunkDistSq - 0.25));
         }
       }
 
-      this.updateGrassChunkLod(chunk, playerX, playerZ, inFrustum);
+      this.updateGrassChunkLod(chunk, grassViewer.x, grassViewer.y, grassViewer.z, inFrustum);
     }
 
     if (!forceLoad && grassBladesActive) {
@@ -2767,12 +3255,12 @@ class TerrainManager {
     }
 
     for (const chunk of refreshedGrassChunks) {
-      this.updateGrassChunkLod(chunk, playerX, playerZ, chunk.inFrustum !== false);
+      this.updateGrassChunkLod(chunk, grassViewer.x, grassViewer.y, grassViewer.z, chunk.inFrustum !== false);
     }
 
     if (grassBladesActive) {
-      this.updateUltraNearGrass(playerX, playerZ, forceLoad);
-      this.updateUltraNearGrassVisibility(playerX, playerZ, frustum);
+      this.updateUltraNearGrass(grassViewer.x, grassViewer.y, grassViewer.z, forceLoad);
+      this.updateUltraNearGrassVisibility(grassViewer.x, grassViewer.y, grassViewer.z, frustum);
     }
   }
 }

@@ -53,9 +53,17 @@ class Game {
     // Sky, sun, moon, stars, lights
     this.setupSky();
 
+    // Sun occlusion state
+    this.sunOcclusionFactor = 1.0;
+    this.sunOcclusionFrame = 0;
+    this.sunOcclusionRaycaster = new THREE.Raycaster();
+
     // Terrain
     this.noise = new PerlinNoise(42);
     this.terrain = new TerrainManager(this.scene, this.noise);
+
+    // Trees
+    this.trees = new TreeManager(this.scene, this.terrain, this.noise, this.camera);
 
     // Water
     this.waterLevel = 0;
@@ -510,6 +518,13 @@ class Game {
   }
 
   setupSky() {
+    this.currentSkyTopColor = new THREE.Color(0x020215);
+    this.currentSkyHorizonColor = new THREE.Color(0x080830);
+    this.currentOceanHorizonColor = new THREE.Color(0x225b8a);
+    this.currentOceanDeepColor = new THREE.Color(0x08192a);
+    this.currentOceanLineColor = new THREE.Color(0x7fc2e8);
+    this.currentUnderwaterFogColor = new THREE.Color(0x0b2136);
+
     // ---- Sky dome with gradient shader ----
     const skyGeo = new THREE.SphereGeometry(900, 32, 15);
     const skyMat = new THREE.ShaderMaterial({
@@ -517,8 +532,11 @@ class Game {
       depthTest: false,
       depthWrite: false,
       uniforms: {
-        topColor:   { value: new THREE.Color(0x020215) },
-        horizColor: { value: new THREE.Color(0x080830) },
+        topColor:   { value: this.currentSkyTopColor },
+        horizColor: { value: this.currentSkyHorizonColor },
+        oceanHorizonColor: { value: this.currentOceanHorizonColor },
+        oceanDeepColor: { value: this.currentOceanDeepColor },
+        oceanLineColor: { value: this.currentOceanLineColor },
       },
       vertexShader: `
         varying float vHeight;
@@ -530,10 +548,23 @@ class Game {
       fragmentShader: `
         uniform vec3 topColor;
         uniform vec3 horizColor;
+        uniform vec3 oceanHorizonColor;
+        uniform vec3 oceanDeepColor;
+        uniform vec3 oceanLineColor;
         varying float vHeight;
         void main() {
-          float t = pow(max(vHeight, 0.0), 0.45);
-          gl_FragColor = vec4(mix(horizColor, topColor, t), 1.0);
+          float skyT = pow(max(vHeight, 0.0), 0.45);
+          vec3 skyColor = mix(horizColor, topColor, skyT);
+
+          float oceanBlend = 1.0 - smoothstep(-0.18, 0.08, vHeight);
+          float oceanT = smoothstep(-1.0, -0.02, vHeight);
+          vec3 oceanColor = mix(oceanDeepColor, oceanHorizonColor, oceanT);
+          vec3 finalColor = mix(skyColor, oceanColor, oceanBlend);
+
+          float horizonBand = 1.0 - smoothstep(0.0, 0.065, abs(vHeight + 0.012));
+          finalColor = mix(finalColor, oceanLineColor, horizonBand * 0.9);
+
+          gl_FragColor = vec4(finalColor, 1.0);
         }
       `
     });
@@ -703,6 +734,64 @@ class Game {
     this.moonLight = new THREE.DirectionalLight(0x8899cc, 0.0);
     this.moonLight.position.set(0, -400, 0);
     this.scene.add(this.moonLight);
+  }
+
+  updateSunOcclusion() {
+    // Run every 4 frames to amortize raycasting cost
+    this.sunOcclusionFrame = (this.sunOcclusionFrame + 1) % 4;
+    if (this.sunOcclusionFrame !== 0) return;
+
+    // Sun position (already updated this frame by updateSky)
+    const sunPos = this.sunMesh.position;
+    const camPos = this.camera.position;
+
+    // If sun is below horizon, keep fully occluded
+    if (!this.sunMesh.visible) {
+      this.sunOcclusionFactor = 0;
+      return;
+    }
+
+    const dir = new THREE.Vector3().subVectors(sunPos, camPos).normalize();
+    const distToSun = camPos.distanceTo(sunPos);
+
+    this.sunOcclusionRaycaster.set(camPos, dir);
+    this.sunOcclusionRaycaster.near = 1;
+    this.sunOcclusionRaycaster.far = distToSun;
+
+    // Build occluder list: nearby terrain chunks + tree trunks
+    const occluders = [];
+    const { cx: pcx, cz: pcz } = this.terrain.worldToChunk(camPos.x, camPos.z);
+    for (const [, chunk] of this.terrain.chunks) {
+      if (
+        Math.abs(chunk.cx - pcx) <= 4 &&
+        Math.abs(chunk.cz - pcz) <= 4 &&
+        chunk.terrainMesh &&
+        chunk.terrainMesh.visible
+      ) {
+        occluders.push(chunk.terrainMesh);
+      }
+    }
+    if (this.trees) {
+      for (const [, treeChunk] of this.trees.treeChunks) {
+        if (!treeChunk.meshGroup) continue;
+        if (treeChunk.meshGroup.isGroup) {
+          treeChunk.meshGroup.traverse((child) => {
+            if (child.isInstancedMesh && child.userData.isTreeTrunk) {
+              occluders.push(child);
+            }
+          });
+        } else if (treeChunk.meshGroup.isInstancedMesh && treeChunk.meshGroup.userData.isTreeTrunk) {
+          occluders.push(treeChunk.meshGroup);
+        }
+      }
+    }
+
+    const hits = this.sunOcclusionRaycaster.intersectObjects(occluders, false);
+    const occluded = hits.length > 0;
+
+    // Smooth transition (~0.15 lerp factor per check = ~4*0.15≈0.6 per second fade)
+    const target = occluded ? 0.0 : 1.0;
+    this.sunOcclusionFactor += (target - this.sunOcclusionFactor) * 0.25;
   }
 
   setupLensFlare() {
@@ -890,15 +979,35 @@ class Game {
     const topC = lerp3(lo.top, hi.top, f);
     const horC = lerp3(lo.hor, hi.hor, f);
 
-    this.skyMesh.material.uniforms.topColor.value.setRGB(...topC);
-    this.skyMesh.material.uniforms.horizColor.value.setRGB(...horC);
-    this.renderer.setClearColor(new THREE.Color().setRGB(...horC));
-    this.scene.fog.color.setRGB(...horC);
+    const oceanHorizonC = lerp3(
+      [0.018, 0.05, 0.10],
+      [0.09, 0.27, 0.46],
+      daylightFactor
+    );
+    const oceanHorizonTint = lerp3(oceanHorizonC, horC, 0.22 + daylightFactor * 0.18);
+    const oceanDeepC = lerp3(
+      [0.004, 0.012, 0.03],
+      [0.02, 0.07, 0.16],
+      daylightFactor
+    );
+    const oceanLineC = lerp3(
+      oceanHorizonTint,
+      lerp3(horC, [0.9, 0.96, 1.0], 0.35),
+      0.38 + horizonSoftness * 0.18
+    );
+    const underwaterFogC = lerp3(oceanDeepC, oceanHorizonTint, 0.28);
+
+    this.currentSkyTopColor.setRGB(...topC);
+    this.currentSkyHorizonColor.setRGB(...horC);
+    this.currentOceanHorizonColor.setRGB(...oceanHorizonTint);
+    this.currentOceanDeepColor.setRGB(...oceanDeepC);
+    this.currentOceanLineColor.setRGB(...oceanLineC);
+    this.currentUnderwaterFogColor.setRGB(...underwaterFogC);
+    this.syncDistanceFadeEnvironment();
 
     if (this.waterMesh) {
       this.waterTime += dt;
       this.waterUniforms.uTime.value = this.waterTime;
-      this.waterUniforms.uSkyColor.value.setRGB(...horC);
       this.waterUniforms.uDayFactor.value = daylightFactor;
       this.updateWaterPatch();
     }
@@ -909,7 +1018,9 @@ class Game {
     this.sunInnerGlow.visible  = sunVisible;
     this.sunOuterGlow.visible  = sunVisible;
     this.sunScatterGlow.visible = sunVisible;
-    this.sunFlareStrength = sunVisible ? aboveHorizonFade * (0.18 + 0.82 * horizonSoftness) : 0;
+    this.updateSunOcclusion();
+    const occ = this.sunOcclusionFactor;
+    this.sunFlareStrength = sunVisible ? aboveHorizonFade * (0.18 + 0.82 * horizonSoftness) * occ : 0;
     if (sunVisible) {
       const e = Math.max(0, sunElev);
       const glowStrength = aboveHorizonFade * (0.2 + 0.8 * horizonSoftness);
@@ -920,10 +1031,10 @@ class Game {
         (0.82 + 0.18 * e) * sunCoreStrength,
         (0.72 + 0.28 * e) * sunCoreStrength
       );
-      // Glow intensities
-      this.sunInnerGlow.material.uniforms.uOpacity.value = 0.9 * glowStrength;
-      this.sunOuterGlow.material.uniforms.uOpacity.value = 0.45 * glowStrength;
-      this.sunScatterGlow.material.uniforms.uOpacity.value = 0.15 * glowStrength;
+      // Glow intensities – faded by occlusion
+      this.sunInnerGlow.material.uniforms.uOpacity.value = 0.9 * glowStrength * occ;
+      this.sunOuterGlow.material.uniforms.uOpacity.value = 0.45 * glowStrength * occ;
+      this.sunScatterGlow.material.uniforms.uOpacity.value = 0.15 * glowStrength * occ;
       // Warm tint on outer glow near horizon
       const warmR = 1.0, warmG = 0.75 + 0.25 * e, warmB = 0.4 + 0.6 * e;
       this.sunOuterGlow.material.uniforms.uColor.value.setRGB(warmR, warmG, warmB);
@@ -974,6 +1085,41 @@ class Game {
     return (this.terrain.viewDistance * 2 + 3) * this.terrain.chunkWorldSize;
   }
 
+  syncDistanceFadeEnvironment() {
+    const visibleSpan = this.getRenderDistanceWorldSpan();
+    const diagonalRadius = visibleSpan * Math.SQRT2 * 0.5;
+    const fogColor = this.isUnderwater ? this.currentUnderwaterFogColor : this.currentSkyHorizonColor;
+    const waterFadeStart = Math.max(260, diagonalRadius * 0.52);
+    const waterFadeRange = Math.max(180, diagonalRadius * 0.36);
+    const terrainFadeStart = Math.max(220, diagonalRadius * 0.46);
+    const terrainFadeRange = Math.max(220, diagonalRadius * 0.42);
+    const underwaterFactor = this.isUnderwater ? 1 : 0;
+
+    this.renderer.setClearColor(fogColor);
+    if (this.scene.fog) {
+      this.scene.fog.color.copy(fogColor);
+    }
+
+    if (this.waterUniforms) {
+      this.waterUniforms.uSkyColor.value.copy(this.currentSkyHorizonColor);
+      this.waterUniforms.uHorizonColor.value.copy(this.currentOceanHorizonColor);
+      this.waterUniforms.uDeepHorizonColor.value.copy(this.currentOceanDeepColor);
+      this.waterUniforms.uFadeStart.value = waterFadeStart;
+      this.waterUniforms.uFadeRange.value = waterFadeRange;
+      this.waterUniforms.uCameraUnderwater.value = underwaterFactor;
+    }
+
+    if (this.terrain && this.terrain.terrainUniforms) {
+      const terrainUniforms = this.terrain.terrainUniforms;
+      if (terrainUniforms.uWaterLevel) terrainUniforms.uWaterLevel.value = this.waterLevel;
+      if (terrainUniforms.uUnderwaterFadeStart) terrainUniforms.uUnderwaterFadeStart.value = terrainFadeStart;
+      if (terrainUniforms.uUnderwaterFadeRange) terrainUniforms.uUnderwaterFadeRange.value = terrainFadeRange;
+      if (terrainUniforms.uHorizonColor) terrainUniforms.uHorizonColor.value.copy(this.currentOceanHorizonColor);
+      if (terrainUniforms.uHorizonDeepColor) terrainUniforms.uHorizonDeepColor.value.copy(this.currentOceanDeepColor);
+      if (terrainUniforms.uCameraUnderwater) terrainUniforms.uCameraUnderwater.value = underwaterFactor;
+    }
+  }
+
   syncDistanceRendering(forceWaterRebuild = false) {
     const visibleSpan = this.getRenderDistanceWorldSpan();
     const diagonalRadius = visibleSpan * Math.SQRT2 * 0.5;
@@ -991,6 +1137,7 @@ class Game {
     this.waterBaseFogDensity = 0.7 / Math.max(diagonalRadius, 500);
 
     this.rebuildWaterMeshes(forceWaterRebuild);
+    this.syncDistanceFadeEnvironment();
   }
 
   setupWater() {
@@ -1000,7 +1147,12 @@ class Game {
       uTime: { value: 0 },
       uColor: { value: new THREE.Color(0x2564a8) },
       uDeepColor: { value: new THREE.Color(0x103765) },
-      uSkyColor: { value: new THREE.Color(0x87ceeb) },
+      uSkyColor: { value: this.currentSkyHorizonColor.clone() },
+      uHorizonColor: { value: this.currentOceanHorizonColor.clone() },
+      uDeepHorizonColor: { value: this.currentOceanDeepColor.clone() },
+      uFadeStart: { value: 540 },
+      uFadeRange: { value: 420 },
+      uCameraUnderwater: { value: 0 },
       uDayFactor: { value: 1 }
     };
 
@@ -1008,17 +1160,20 @@ class Game {
       uniforms: this.waterUniforms,
       transparent: true,
       depthTest: true,
-      depthWrite: true,
+      depthWrite: false,
       side: THREE.FrontSide,
       vertexShader: `
         uniform float uTime;
         attribute float waveAmp;
         attribute float waveMotion;
+        attribute float innerFade;
         varying vec3 vWorldPos;
         varying vec3 vNormal;
         varying float vWaveAmp;
+        varying float vInnerFade;
 
         void main() {
+          vInnerFade = innerFade;
           vec4 worldP = modelMatrix * vec4(position, 1.0);
 
           float waveA = sin(worldP.x * 0.055 + uTime * 1.35) * 0.5;
@@ -1047,13 +1202,20 @@ class Game {
         uniform vec3 uColor;
         uniform vec3 uDeepColor;
         uniform vec3 uSkyColor;
+        uniform vec3 uHorizonColor;
+        uniform vec3 uDeepHorizonColor;
+        uniform float uFadeStart;
+        uniform float uFadeRange;
+        uniform float uCameraUnderwater;
         uniform float uDayFactor;
         varying vec3 vWorldPos;
         varying vec3 vNormal;
         varying float vWaveAmp;
+        varying float vInnerFade;
 
         void main() {
           vec3 viewDir = normalize(cameraPosition - vWorldPos);
+          float waterDistance = distance(vWorldPos.xz, cameraPosition.xz);
           float fresnel = pow(clamp(1.0 - max(dot(viewDir, vNormal), 0.0), 0.0, 1.0), 3.0);
           float depthTint = clamp((vWaveAmp - 0.03) / 0.29, 0.0, 1.0);
           vec3 waterBase = mix(uColor, uDeepColor, depthTint);
@@ -1062,8 +1224,15 @@ class Game {
           vec3 reflectedSky = mix(uSkyColor * 0.2, uSkyColor, uDayFactor);
           float reflectionStrength = mix(0.18, 0.72, uDayFactor);
           vec3 finalColor = mix(waterBase, reflectedSky, fresnel * reflectionStrength);
+          float distanceFade = smoothstep(uFadeStart, uFadeStart + max(uFadeRange, 1.0), waterDistance);
+          distanceFade = clamp(distanceFade * mix(0.94, 1.12, uCameraUnderwater), 0.0, 1.0);
+          vec3 horizonWater = mix(uHorizonColor, uDeepHorizonColor, clamp(uCameraUnderwater * 0.82 + depthTint * 0.18, 0.0, 1.0));
+          finalColor = mix(finalColor, horizonWater, distanceFade);
+          float alpha = mix(mix(0.72, 0.82, uDayFactor), 0.0, distanceFade);
+          alpha *= vInnerFade;
+          if (alpha < 0.005) discard;
 
-          gl_FragColor = vec4(finalColor, mix(0.72, 0.82, uDayFactor));
+          gl_FragColor = vec4(finalColor, alpha);
         }
       `
     });
@@ -1207,8 +1376,8 @@ class Game {
         innerSize: farSize,
         segments: 6,
         snap: 48,
-        waveVisualScale: 0.55,
-        waveMotionScale: 0.0,
+        waveVisualScale: 0.28,
+        waveMotionScale: 0.05,
         renderOrder: 27,
       },
     ];
@@ -1220,10 +1389,12 @@ class Game {
     const positions = new Float32Array(vertexCount * 3);
     const waveAmp = new Float32Array(vertexCount);
     const waveMotion = new Float32Array(vertexCount);
+    const innerFadeArr = new Float32Array(vertexCount);
     const indices = [];
     const halfSize = size * 0.5;
     const step = size / segments;
     const innerHalf = innerSize * 0.5;
+    const fadeWidth = innerSize > 0 ? Math.max(step * 2.5, innerHalf * 0.18) : 0;
 
     let vertexIndex = 0;
     for (let iz = 0; iz <= segments; iz++) {
@@ -1234,6 +1405,14 @@ class Game {
         positions[base] = x;
         positions[base + 1] = 0;
         positions[base + 2] = z;
+
+        if (innerSize > 0 && fadeWidth > 0) {
+          const distFromInner = Math.max(Math.abs(x), Math.abs(z)) - innerHalf;
+          innerFadeArr[vertexIndex] = Math.max(0.0, Math.min(1.0, distFromInner / fadeWidth));
+        } else {
+          innerFadeArr[vertexIndex] = 1.0;
+        }
+
         vertexIndex += 1;
       }
     }
@@ -1260,6 +1439,7 @@ class Game {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('waveAmp', new THREE.BufferAttribute(waveAmp, 1));
     geometry.setAttribute('waveMotion', new THREE.BufferAttribute(waveMotion, 1));
+    geometry.setAttribute('innerFade', new THREE.BufferAttribute(innerFadeArr, 1));
     geometry.setIndex(indices);
     geometry.computeVertexNormals();
 
@@ -1326,7 +1506,8 @@ class Game {
     const centerX = this.position ? this.position.x : 0;
     const centerZ = this.position ? this.position.z : 0;
 
-    for (const lod of this.waterLods) {
+    for (let lodIndex = 0; lodIndex < this.waterLods.length; lodIndex++) {
+      const lod = this.waterLods[lodIndex];
       const snappedX = Math.floor(centerX / lod.snap) * lod.snap;
       const snappedZ = Math.floor(centerZ / lod.snap) * lod.snap;
 
@@ -1344,13 +1525,32 @@ class Game {
       const waveMotion = geometry.attributes.waveMotion;
       const ampArray = waveAmp.array;
       const motionArray = waveMotion.array;
+      const previousLod = lodIndex > 0 ? this.waterLods[lodIndex - 1] : null;
+      const previousVisualScale = previousLod ? previousLod.waveVisualScale : lod.waveVisualScale;
+      const previousMotionScale = previousLod ? previousLod.waveMotionScale : lod.waveMotionScale;
+      const ringThickness = Math.max((lod.size - lod.innerSize) * 0.5, lod.size * 0.05, 1);
+      const blendDistance = lod.innerSize > 0
+        ? Math.min(ringThickness, Math.max(lod.size / Math.max(lod.segments, 1) * 2.5, ringThickness * 0.2))
+        : 0;
 
       for (let i = 0, j = 0; i < ampArray.length; i++, j += 3) {
-        const worldX = snappedX + positions[j];
-        const worldZ = snappedZ + positions[j + 2];
+        const localX = positions[j];
+        const localZ = positions[j + 2];
+        const worldX = snappedX + localX;
+        const worldZ = snappedZ + localZ;
         const baseAmp = this.getWaterWaveAmplitude(worldX, worldZ);
-        ampArray[i] = baseAmp * lod.waveVisualScale;
-        motionArray[i] = baseAmp * lod.waveMotionScale;
+        let visualScale = lod.waveVisualScale;
+        let motionScale = lod.waveMotionScale;
+
+        if (lod.innerSize > 0 && blendDistance > 0) {
+          const distFromInnerEdge = Math.max(0, Math.max(Math.abs(localX), Math.abs(localZ)) - lod.innerSize * 0.5);
+          const blend = Math.max(0, Math.min(1, distFromInnerEdge / blendDistance));
+          visualScale = previousVisualScale + (lod.waveVisualScale - previousVisualScale) * blend;
+          motionScale = previousMotionScale + (lod.waveMotionScale - previousMotionScale) * blend;
+        }
+
+        ampArray[i] = baseAmp * visualScale;
+        motionArray[i] = baseAmp * motionScale;
       }
 
       waveAmp.needsUpdate = true;
@@ -1424,6 +1624,9 @@ class Game {
     this.isFlying = false;
     this.setDebugMenuOpen(false);
     this.setPhoneOpen(false, { skipPointerLock: true, immediate: true });
+    if (this.trees) {
+      this.trees.dispose();
+    }
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
@@ -2399,6 +2602,7 @@ class Game {
     ctx.fillRect(0, 0, width, height);
 
     this.drawPhoneMapTerrainLayer(ctx, width, height, centerX, centerZ, halfSpan);
+    this.drawPhoneMapTreeLayer(ctx, width, height, centerX, centerZ, halfSpan);
     this.drawPhoneMapRoads(ctx, width, height, centerX, centerZ, halfSpan);
   }
 
@@ -2513,6 +2717,89 @@ class Game {
     ctx.imageSmoothingEnabled = true;
     if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(raster.canvas, 0, 0, width, height);
+    ctx.restore();
+  }
+
+  drawPhoneMapTreeLayer(ctx, width, height, centerX, centerZ, halfSpan) {
+    if (!this.trees || !this.noise) return;
+
+    const map = this.phoneMap;
+    if (!map.treeRasterCanvas) {
+      map.treeRasterCanvas = document.createElement('canvas');
+      map.treeRasterCtx = map.treeRasterCanvas.getContext('2d');
+    }
+
+    // Match terrain raster resolution
+    const detailScale = halfSpan <= 1440 ? 0.42 : halfSpan <= 11520 ? 0.32 : halfSpan <= 92160 ? 0.24 : 0.18;
+    const minSample = halfSpan <= 1440 ? 96 : halfSpan <= 11520 ? 72 : 56;
+    const maxSample = halfSpan <= 1440 ? 160 : halfSpan <= 11520 ? 128 : 96;
+    const sw = Math.max(minSample, Math.min(maxSample, Math.round(width * detailScale)));
+    const sh = Math.max(minSample, Math.min(maxSample, Math.round(height * detailScale)));
+
+    if (map.treeRasterCanvas.width !== sw || map.treeRasterCanvas.height !== sh) {
+      map.treeRasterCanvas.width = sw;
+      map.treeRasterCanvas.height = sh;
+    }
+
+    const rCtx = map.treeRasterCtx;
+    const imageData = rCtx.createImageData(sw, sh);
+    const pixels = imageData.data;
+
+    const noise = this.noise;
+    const noiseScale = this.trees.treeNoiseScale;
+    const noiseOffX = this.trees.treeNoiseOffsetX;
+    const noiseOffZ = this.trees.treeNoiseOffsetZ;
+    const threshold = this.trees.treeNoiseThreshold;
+    const span = halfSpan * 2;
+    const minX = centerX - halfSpan;
+    const minZ = centerZ - halfSpan;
+    const stepX = span / Math.max(1, sw - 1);
+    const stepZ = span / Math.max(1, sh - 1);
+
+    for (let y = 0; y < sh; y++) {
+      const worldZ = minZ + y * stepZ;
+      for (let x = 0; x < sw; x++) {
+        const worldX = minX + x * stepX;
+
+        // Skip water
+        const h = this.terrain.getBaseHeight(worldX, worldZ);
+        if (h <= this.waterLevel) continue;
+
+        // Skip steep slopes (approximate: use neighbour heights)
+        const hL = this.terrain.getBaseHeight(worldX - stepX, worldZ);
+        const hR = this.terrain.getBaseHeight(worldX + stepX, worldZ);
+        const hU = this.terrain.getBaseHeight(worldX, worldZ - stepZ);
+        const hD = this.terrain.getBaseHeight(worldX, worldZ + stepZ);
+        const dxH = (hR - hL) / (2 * stepX);
+        const dzH = (hD - hU) / (2 * stepZ);
+        const normalY = 1 / Math.sqrt(dxH * dxH + 1 + dzH * dzH);
+        if (normalY < 0.82) continue;
+
+        // Sample tree noise
+        const n = noise.perlin2(
+          (worldX + noiseOffX) * noiseScale,
+          (worldZ + noiseOffZ) * noiseScale
+        ) * 0.5 + 0.5;
+        if (n < threshold) continue;
+
+        // Map density to alpha (denser = more opaque)
+        const density = (n - threshold) / (1 - threshold);
+        const alpha = Math.round(density * 150);
+
+        const offset = (y * sw + x) * 4;
+        pixels[offset]     = 28;
+        pixels[offset + 1] = 95;
+        pixels[offset + 2] = 36;
+        pixels[offset + 3] = alpha;
+      }
+    }
+
+    rCtx.putImageData(imageData, 0, 0);
+
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(map.treeRasterCanvas, 0, 0, width, height);
     ctx.restore();
   }
 
@@ -3087,11 +3374,15 @@ class Game {
       this.syncDebugMenuUI();
     }
     this.updateMovement(dt);
+    this.syncDistanceFadeEnvironment();
     this.updateCamera();
     this.updateOtherPlayers(dt);
 
     // Update terrain around player
     this.terrain.update(this.position.x, this.position.z, this.camera);
+
+    // Update trees
+    this.trees.update(this.position.x, this.position.z, this.camera);
 
     // Update HUD
     document.getElementById('coords').textContent =

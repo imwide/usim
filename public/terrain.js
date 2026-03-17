@@ -98,7 +98,7 @@ class TerrainManager {
     });
 
     this.grassRenderDistance = 200;
-    this.grassHighDetailDistance = 130;
+    this.grassHighDetailDistance = 50;
     this.grassDenseSpacing = 0.006;
     this.grassSparseSpacing = 0.2;
     this.grassUltraNearDistance = 10;
@@ -111,9 +111,14 @@ class TerrainManager {
     this.grassUltraBillboardSpacing = 0.35;
     this.grassUltraBillboardDensityMultiplier = 0.25;
     this.grassUltraBillboardFadeDistance = 8;
+    this.grassUltraToDetailedOverlapDistance = 2;
+    this.grassDetailedToFarOverlapDistance = 6;
     this.grassHeight = 1.0;
     this.grassBaseWidth = 0.078;
     this.grassBillboardWidth = this.grassBaseWidth * 13.4;
+    this.grassFarBillboardWidth = this.grassBillboardWidth * 4;
+    this.grassFarBillboardStitchCount = 4;
+    this.grassFarBillboardFrequencyMultiplier = 0.45;
     this.grassBillboardHeight = this.grassHeight * 1.12;
     this.grassBillboardVariantCount = 10;
     this.grassBillboardAtlasColumns = 5;
@@ -638,27 +643,34 @@ class TerrainManager {
     this.grassUltraCullSphere = new THREE.Sphere();
     this.grassUltraBillboardCullSphere = new THREE.Sphere();
     this.grassBillboardTexture = this.createGrassBillboardTexture();
+    this.grassFarBillboardTexture = this.createGrassBillboardTexture({
+      stitchedCopies: this.grassFarBillboardStitchCount,
+    });
     this.grassUltraGeometry = this.createDetailedGrassBladeGeometry(this.grassHeight, this.grassBaseWidth, 4);
-    this.grassDetailedGeometry = this.createGrassBillboardGeometry(this.grassBillboardHeight, this.grassBillboardWidth);
+    this.grassUltraBillboardGeometry = this.createGrassBillboardGeometry(this.grassBillboardHeight, this.grassBillboardWidth);
+    this.grassDetailedGeometry = this.createGrassBillboardGeometry(this.grassBillboardHeight, this.grassFarBillboardWidth);
     this.grassSimpleGeometry = this.grassDetailedGeometry;
     this.grassUltraMaterial = this.createGrassMaterial(0, this.grassUltraNearDistance, this.grassUltraFadeDistance);
     this.grassUltraBillboardMaterial = this.createGrassBillboardMaterial(
       0,
       this.grassUltraBillboardDistance,
       this.grassUltraBillboardFadeDistance,
-      this.grassUltraBillboardFadeDistance
+      this.grassUltraBillboardFadeDistance,
+      this.grassBillboardTexture
     );
     this.grassDetailedMaterial = this.createGrassBillboardMaterial(
-      this.grassUltraBillboardDistance,
+      Math.max(0, this.grassUltraBillboardDistance - this.grassUltraToDetailedOverlapDistance),
       this.grassHighDetailDistance,
       this.grassLodFadeDistance,
-      this.grassUltraBillboardFadeDistance
+      this.grassUltraBillboardFadeDistance,
+      this.grassFarBillboardTexture
     );
     this.grassSimpleMaterial = this.createGrassBillboardMaterial(
-      this.grassHighDetailDistance,
+      Math.max(0, this.grassHighDetailDistance - this.grassDetailedToFarOverlapDistance),
       this.grassRenderDistance,
       this.grassLodFadeDistance,
-      Math.max(6, this.grassLodFadeDistance * 0.55)
+      Math.max(6, this.grassLodFadeDistance * 0.55),
+      this.grassFarBillboardTexture
     );
     this.grassUltraMesh = null;
     this.grassUltraBillboardMesh = null;
@@ -1195,11 +1207,77 @@ class TerrainManager {
     return geometry;
   }
 
-  createGrassBillboardTexture() {
+  drawGrassBillboardTextureTile(ctx, variantSeed, cellX, cellY, cellWidth, cellHeight) {
+    const rootY = cellY + cellHeight - 9;
+    const bladeCount = 14 + Math.floor(this.hash2(variantSeed, variantSeed * 7, 941) * 5);
+
+    for (let layer = 0; layer < 3; layer++) {
+      const layerBladeCount = Math.max(8, bladeCount - (layer === 0 ? 3 : layer === 1 ? 0 : 4));
+
+      for (let blade = 0; blade < layerBladeCount; blade++) {
+        const seedBase = variantSeed * 101 + blade * 17 + layer * 59;
+        const spread = this.clamp(
+          (blade + 0.5 + (this.hash2(seedBase, variantSeed, 942) - 0.5) * 0.78) / layerBladeCount,
+          0.02,
+          0.98
+        );
+        const rootX = cellX + cellWidth * spread;
+        const heightBase = layer === 0 ? 0.3 : layer === 1 ? 0.44 : 0.58;
+        const heightRange = layer === 0 ? 0.12 : layer === 1 ? 0.16 : 0.18;
+        const height = cellHeight * heightBase
+          + this.hash2(seedBase, variantSeed, 943) * cellHeight * heightRange;
+        const tipLean = (this.hash2(seedBase, variantSeed, 944) - 0.5) * cellWidth * (layer === 0 ? 0.24 : layer === 1 ? 0.34 : 0.42);
+        const controlLean = (this.hash2(seedBase, variantSeed, 945) - 0.5) * cellWidth * (layer === 0 ? 0.18 : layer === 1 ? 0.26 : 0.32);
+        const lineWidth = (layer === 0 ? 2.2 : layer === 1 ? 3.0 : 3.7)
+          + this.hash2(seedBase, variantSeed, 946) * (layer === 0 ? 1.2 : layer === 1 ? 1.6 : 2.0);
+        const bottomShade = 0.32 + this.hash2(seedBase, variantSeed, 947) * 0.12;
+        const midShade = 0.48 + this.hash2(seedBase, variantSeed, 948) * 0.14;
+        const tipShade = 0.66 + this.hash2(seedBase, variantSeed, 949) * 0.16;
+        const depthFactor = layer === 0 ? 0.45 : layer === 1 ? 0.75 : 1.0;
+        const gradient = ctx.createLinearGradient(rootX, rootY, rootX + tipLean, rootY - height);
+        gradient.addColorStop(0, `rgba(${Math.round((58 + bottomShade * 28) * depthFactor)}, ${Math.round((96 + bottomShade * 42) * depthFactor)}, ${Math.round((36 + bottomShade * 18) * depthFactor)}, 1.0)`);
+        gradient.addColorStop(0.55, `rgba(${Math.round((84 + midShade * 26) * depthFactor)}, ${Math.round((132 + midShade * 40) * depthFactor)}, ${Math.round((54 + midShade * 18) * depthFactor)}, 1.0)`);
+        gradient.addColorStop(1, `rgba(${Math.round((118 + tipShade * 24) * depthFactor)}, ${Math.round((164 + tipShade * 34) * depthFactor)}, ${Math.round((82 + tipShade * 16) * depthFactor)}, 1.0)`);
+
+        ctx.strokeStyle = gradient;
+        ctx.lineWidth = lineWidth;
+        ctx.beginPath();
+        ctx.moveTo(rootX, rootY);
+        ctx.quadraticCurveTo(
+          rootX + controlLean,
+          rootY - height * (0.45 + this.hash2(seedBase, variantSeed, 950) * 0.16),
+          rootX + tipLean,
+          rootY - height
+        );
+        ctx.stroke();
+
+        if (layer >= 1) {
+          ctx.strokeStyle = `rgba(226, 241, 196, ${0.06 + this.hash2(seedBase, variantSeed, 951) * (layer === 1 ? 0.04 : 0.06)})`;
+          ctx.lineWidth = Math.max(1.2, lineWidth * 0.22);
+          ctx.beginPath();
+          ctx.moveTo(rootX + lineWidth * 0.08, rootY - 3);
+          ctx.quadraticCurveTo(
+            rootX + controlLean * 0.78,
+            rootY - height * 0.46,
+            rootX + tipLean * 0.82,
+            rootY - height + lineWidth * 0.2
+          );
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  createGrassBillboardTexture(options = null) {
+    const stitchedCopies = Math.max(
+      1,
+      Math.round(Number(options && (options.stitchedCopies ?? options.widthMultiplier)) || 1)
+    );
     const columns = Math.max(1, this.grassBillboardAtlasColumns);
     const variantCount = Math.max(1, this.grassBillboardVariantCount);
     const rows = Math.ceil(variantCount / columns);
-    const cellWidth = 148;
+    const baseCellWidth = 148;
+    const cellWidth = baseCellWidth * stitchedCopies;
     const cellHeight = 168;
     const canvas = document.createElement('canvas');
     canvas.width = columns * cellWidth;
@@ -1213,66 +1291,17 @@ class TerrainManager {
     for (let variant = 0; variant < variantCount; variant++) {
       const cellX = (variant % columns) * cellWidth;
       const cellY = Math.floor(variant / columns) * cellHeight;
-      const rootY = cellY + cellHeight - 9;
-      const bladeCount = 14 + Math.floor(this.hash2(variant, variant * 7, 941) * 5);
-
-      for (let layer = 0; layer < 3; layer++) {
-        const layerBladeCount = Math.max(8, bladeCount - (layer === 0 ? 3 : layer === 1 ? 0 : 4));
-
-        for (let blade = 0; blade < layerBladeCount; blade++) {
-          const seedBase = variant * 101 + blade * 17 + layer * 59;
-          const spread = this.clamp(
-            (blade + 0.5 + (this.hash2(seedBase, variant, 942) - 0.5) * 0.78) / layerBladeCount,
-            0.02,
-            0.98
-          );
-          const rootX = cellX + cellWidth * spread;
-          const heightBase = layer === 0 ? 0.3 : layer === 1 ? 0.44 : 0.58;
-          const heightRange = layer === 0 ? 0.12 : layer === 1 ? 0.16 : 0.18;
-          const height = cellHeight * heightBase
-            + this.hash2(seedBase, variant, 943) * cellHeight * heightRange;
-          const tipLean = (this.hash2(seedBase, variant, 944) - 0.5) * cellWidth * (layer === 0 ? 0.24 : layer === 1 ? 0.34 : 0.42);
-          const controlLean = (this.hash2(seedBase, variant, 945) - 0.5) * cellWidth * (layer === 0 ? 0.18 : layer === 1 ? 0.26 : 0.32);
-          const lineWidth = (layer === 0 ? 2.2 : layer === 1 ? 3.0 : 3.7)
-            + this.hash2(seedBase, variant, 946) * (layer === 0 ? 1.2 : layer === 1 ? 1.6 : 2.0);
-          const bottomShade = 0.32 + this.hash2(seedBase, variant, 947) * 0.12;
-          const midShade = 0.48 + this.hash2(seedBase, variant, 948) * 0.14;
-          const tipShade = 0.66 + this.hash2(seedBase, variant, 949) * 0.16;
-          const gradient = ctx.createLinearGradient(rootX, rootY, rootX + tipLean, rootY - height);
-          gradient.addColorStop(0, `rgba(${Math.round(58 + bottomShade * 28)}, ${Math.round(96 + bottomShade * 42)}, ${Math.round(36 + bottomShade * 18)}, ${layer === 0 ? 0.18 : layer === 1 ? 0.42 : 0.68})`);
-          gradient.addColorStop(0.55, `rgba(${Math.round(84 + midShade * 26)}, ${Math.round(132 + midShade * 40)}, ${Math.round(54 + midShade * 18)}, ${layer === 0 ? 0.24 : layer === 1 ? 0.52 : 0.74})`);
-          gradient.addColorStop(1, `rgba(${Math.round(118 + tipShade * 24)}, ${Math.round(164 + tipShade * 34)}, ${Math.round(82 + tipShade * 16)}, ${layer === 0 ? 0.2 : layer === 1 ? 0.44 : 0.66})`);
-
-          ctx.strokeStyle = gradient;
-          ctx.lineWidth = lineWidth;
-          ctx.beginPath();
-          ctx.moveTo(rootX, rootY);
-          ctx.quadraticCurveTo(
-            rootX + controlLean,
-            rootY - height * (0.45 + this.hash2(seedBase, variant, 950) * 0.16),
-            rootX + tipLean,
-            rootY - height
-          );
-          ctx.stroke();
-
-          if (layer >= 1) {
-            ctx.strokeStyle = `rgba(226, 241, 196, ${0.06 + this.hash2(seedBase, variant, 951) * (layer === 1 ? 0.04 : 0.06)})`;
-            ctx.lineWidth = Math.max(1.2, lineWidth * 0.22);
-            ctx.beginPath();
-            ctx.moveTo(rootX + lineWidth * 0.08, rootY - 3);
-            ctx.quadraticCurveTo(
-              rootX + controlLean * 0.78,
-              rootY - height * 0.46,
-              rootX + tipLean * 0.82,
-              rootY - height + lineWidth * 0.2
-            );
-            ctx.stroke();
-          }
-        }
+      for (let copyIndex = 0; copyIndex < stitchedCopies; copyIndex++) {
+        const tileX = cellX + copyIndex * baseCellWidth;
+        const tileSeed = variant + copyIndex * variantCount;
+        this.drawGrassBillboardTextureTile(ctx, tileSeed, tileX, cellY, baseCellWidth, cellHeight);
       }
     }
 
+    this.bleedTransparentCanvasColors(ctx, canvas.width, canvas.height, 3);
+
     const texture = new THREE.CanvasTexture(canvas);
+    texture.premultiplyAlpha = false;
     texture.wrapS = THREE.ClampToEdgeWrapping;
     texture.wrapT = THREE.ClampToEdgeWrapping;
     texture.encoding = THREE.sRGBEncoding;
@@ -1280,21 +1309,103 @@ class TerrainManager {
     return texture;
   }
 
+  bleedTransparentCanvasColors(ctx, width, height) {
+    if (!ctx || width <= 0 || height <= 0) return;
+
+    let imageData = ctx.getImageData(0, 0, width, height);
+    let source = imageData.data;
+
+    // We track which pixels have a "solid, pure" color vs which need to be overwritten.
+    // Anything with alpha < 250 is considered "muddy" (blended with canvas background) 
+    // or "empty". We will overwrite their RGB with the nearest solid pixel's RGB.
+    const hasValidColor = new Uint8Array(width * height);
+    for (let i = 0; i < width * height; i++) {
+      hasValidColor[i] = source[i * 4 + 3] >= 250 ? 1 : 0;
+    }
+
+    // 16 iterations guarantees we spread the pure colors far enough such that 
+    // WebGL mipmapping will average bright-green with bright-green everywhere.
+    for (let iteration = 0; iteration < 16; iteration++) {
+      let changed = false;
+      const nextSource = new Uint8ClampedArray(source);
+      const nextValid = new Uint8Array(hasValidColor);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = y * width + x;
+          
+          if (hasValidColor[i]) continue;
+
+          let r = 0, g = 0, b = 0, count = 0;
+
+          // Check 8 neighbors
+          for (let oy = -1; oy <= 1; oy++) {
+            const ny = y + oy;
+            if (ny < 0 || ny >= height) continue;
+
+            for (let ox = -1; ox <= 1; ox++) {
+              const nx = x + ox;
+              if (nx < 0 || nx >= width) continue;
+
+              const ni = ny * width + nx;
+              if (hasValidColor[ni]) {
+                r += source[ni * 4];
+                g += source[ni * 4 + 1];
+                b += source[ni * 4 + 2];
+                count++;
+              }
+            }
+          }
+
+          if (count > 0) {
+            const index = i * 4;
+            nextSource[index]     = Math.round(r / count);
+            nextSource[index + 1] = Math.round(g / count);
+            nextSource[index + 2] = Math.round(b / count);
+            // DO NOT modify nextSource[index + 3] - preserve original anti-aliased Alpha!
+            nextValid[i] = 1;
+            changed = true;
+          }
+        }
+      }
+
+      source = nextSource;
+      for (let k = 0; k < hasValidColor.length; k++) {
+        hasValidColor[k] = nextValid[k];
+      }
+      if (!changed) break;
+    }
+
+    // Final pass for any deep empty spaces the bleed didn't reach
+    const fallbackR = 64, fallbackG = 110, fallbackB = 35;
+    for (let i = 0; i < width * height; i++) {
+        if (!hasValidColor[i]) {
+            source[i * 4]     = fallbackR;
+            source[i * 4 + 1] = fallbackG;
+            source[i * 4 + 2] = fallbackB;
+        }
+    }
+
+    imageData.data.set(source);
+    ctx.putImageData(imageData, 0, 0);
+  }
+
   createGrassBillboardMaterial(
     visibleMinDistance = 0,
     visibleMaxDistance = Infinity,
     fadeDistance = this.grassLodFadeDistance,
-    fadeInDistance = fadeDistance
+    fadeInDistance = fadeDistance,
+    billboardTexture = this.grassBillboardTexture
   ) {
     const material = new THREE.MeshLambertMaterial({
       color: 0xffffff,
-      map: this.grassBillboardTexture,
+      map: billboardTexture || this.grassBillboardTexture,
       side: THREE.DoubleSide,
-      depthWrite: false,
+      depthWrite: true,
       depthTest: true,
       fog: true,
-      transparent: true,
-      alphaTest: 0.2,
+      transparent: false,
+      alphaTest: 0.5,
     });
 
     material.userData.isGrassBillboard = true;
@@ -1303,6 +1414,7 @@ class TerrainManager {
       uGrassVisibleMax: { value: visibleMaxDistance },
       uGrassFadeDistance: { value: fadeDistance },
       uGrassFadeInDistance: { value: fadeInDistance },
+      uGrassColorFadeMax: { value: this.grassRenderDistance + this.grassLodFadeDistance },
       uGrassAtlasGrid: {
         value: new THREE.Vector2(
           this.grassBillboardAtlasColumns,
@@ -1319,6 +1431,7 @@ class TerrainManager {
       shader.uniforms.uGrassVisibleMax = material.userData.grassLodUniforms.uGrassVisibleMax;
       shader.uniforms.uGrassFadeDistance = material.userData.grassLodUniforms.uGrassFadeDistance;
       shader.uniforms.uGrassFadeInDistance = material.userData.grassLodUniforms.uGrassFadeInDistance;
+      shader.uniforms.uGrassColorFadeMax = material.userData.grassLodUniforms.uGrassColorFadeMax;
       shader.uniforms.uGrassAtlasGrid = material.userData.grassLodUniforms.uGrassAtlasGrid;
       shader.uniforms.uGrassAtlasInset = material.userData.grassLodUniforms.uGrassAtlasInset;
 
@@ -1331,6 +1444,7 @@ class TerrainManager {
         uniform float uGrassVisibleMax;
         uniform float uGrassFadeDistance;
         uniform float uGrassFadeInDistance;
+        uniform float uGrassColorFadeMax;
         uniform vec2 uGrassAtlasGrid;
         uniform float uGrassAtlasInset;
         attribute float bladeFactor;
@@ -1381,9 +1495,7 @@ class TerrainManager {
         float fadeOut = uGrassVisibleMax > 1000000.0
           ? 1.0
           : 1.0 - smoothstep(uGrassVisibleMax - uGrassFadeDistance, uGrassVisibleMax, grassPlayerDist);
-        vGrassDistanceFade = uGrassVisibleMax > 1000000.0
-          ? 0.0
-          : clamp((grassPlayerDist - uGrassVisibleMin) / max(1.0, uGrassVisibleMax - uGrassVisibleMin), 0.0, 1.0);
+        vGrassDistanceFade = clamp(grassPlayerDist / max(1.0, uGrassColorFadeMax), 0.0, 1.0);
         vGrassVisibility = clamp(fadeIn * fadeOut, 0.0, 1.0);
 
         float primaryWave = sin(uGrassTime * 1.32 + grassWorldRoot.x * 0.028 + grassWorldRoot.z * 0.024);
@@ -1414,8 +1526,8 @@ class TerrainManager {
         vec3 bladeGradient = mix(vec3(0.88, 0.94, 0.82), vec3(1.02, 1.07, 0.96), smoothstep(0.0, 1.0, vBladeFactor));
         vec3 grassColor = diffuseColor.rgb * bladeGradient * vGrassTint;
         float grassLuma = dot(grassColor, vec3(0.299, 0.587, 0.114));
-        grassColor = mix(grassColor, vec3(grassLuma), 0.14 + vGrassDistanceFade * 0.28);
-        grassColor = mix(grassColor, vec3(1.0), 0.04 + vGrassDistanceFade * 0.16);
+        grassColor = mix(grassColor, vec3(grassLuma), 0.05 + vGrassDistanceFade * 0.10);
+        grassColor = mix(grassColor, vec3(1.0), 0.015 + vGrassDistanceFade * 0.045);
         diffuseColor.rgb = grassColor * mix(0.62, 1.0, vGrassVisibility);
         diffuseColor.a *= vGrassVisibility;
         if (diffuseColor.a < 0.01) discard;`
@@ -1423,7 +1535,7 @@ class TerrainManager {
     };
 
     material.customProgramCacheKey = () => (
-      `terrain-grass-billboard-v4-${visibleMinDistance}-${visibleMaxDistance}-${fadeDistance}-${fadeInDistance}`
+      `terrain-grass-billboard-v5-${visibleMinDistance}-${visibleMaxDistance}-${fadeDistance}-${fadeInDistance}`
     );
 
     return material;
@@ -1607,7 +1719,7 @@ class TerrainManager {
     };
   }
 
-  createGrassSamplesForChunk(chunk, spacing, clusterThreshold, lod = 'high') {
+  createGrassSamplesForChunk(chunk, spacing, clusterThreshold, lod = 'high', frequencyMultiplier = 1) {
     if (!chunk || !chunk.terrainMesh) return [];
 
     const size = chunk.gridSize || this.chunkSize;
@@ -1624,6 +1736,11 @@ class TerrainManager {
     const jitterAmount = subCellSize * (isBillboardLod ? 0.92 : isHighLod ? 0.82 : 0.65);
     const originX = chunk.cx * this.chunkWorldSize;
     const originZ = chunk.cz * this.chunkWorldSize;
+    const sampleFrequency = this.clamp(
+      Number.isFinite(frequencyMultiplier) ? frequencyMultiplier : 1,
+      0,
+      1
+    );
     const samples = [];
 
     for (let iz = 0; iz < size - 1; iz += quadStride) {
@@ -1633,8 +1750,8 @@ class TerrainManager {
 
         for (let subZ = 0; subZ < samplesPerQuadAxis; subZ++) {
           for (let subX = 0; subX < samplesPerQuadAxis; subX++) {
-            const seedX = ix * 17 + subX * 31 + (isHighLod ? 11 : 101);
-            const seedZ = iz * 19 + subZ * 37 + (isHighLod ? 13 : 103);
+            const seedX = ix * 17 + subX * 31 + (isBillboardLod ? 11 : (isHighLod ? 11 : 101));
+            const seedZ = iz * 19 + subZ * 37 + (isBillboardLod ? 13 : (isHighLod ? 13 : 103));
             const offsetX = (this.hash2(chunk.cx * 4096 + seedX, chunk.cz * 4096 + seedZ, 901) - 0.5) * jitterAmount;
             const offsetZ = (this.hash2(chunk.cx * 4096 + seedX, chunk.cz * 4096 + seedZ, 902) - 0.5) * jitterAmount;
             const wx = this.clamp(
@@ -1652,6 +1769,11 @@ class TerrainManager {
             const spawnData = this.getGrassSpawnData(wx, wz, height, terrainColor, clusterThreshold);
 
             if (!spawnData) continue;
+
+            if (isBillboardLod && sampleFrequency < 0.999) {
+              const frequencyRoll = this.hash2(wx * 0.47, wz * 0.47, 910);
+              if (frequencyRoll > sampleFrequency) continue;
+            }
 
             const coverage = spawnData.coverage || 0;
             const heightScale = isBillboardLod
@@ -1889,7 +2011,7 @@ class TerrainManager {
     const ultraBillboardSamples = this.createUltraNearBillboardSamples(playerX, playerZ);
     this.grassUltraBillboardMesh = this.createGrassInstancedMesh(
       ultraBillboardSamples,
-      this.grassDetailedGeometry,
+      this.grassUltraBillboardGeometry,
       this.grassUltraBillboardMaterial
     );
 
@@ -1974,7 +2096,7 @@ class TerrainManager {
     if (lodKey === 'high') {
       if (chunk.grassHighReady) return false;
 
-      const detailedSamples = this.createGrassSamplesForChunk(chunk, this.grassDenseSpacing, 0.22, 'billboard-high');
+      const detailedSamples = this.createGrassSamplesForChunk(chunk, this.grassDenseSpacing, 0.22, 'billboard-high', 1);
       chunk.grassHighMesh = this.createGrassInstancedMesh(
         detailedSamples,
         this.grassDetailedGeometry,
@@ -1993,7 +2115,13 @@ class TerrainManager {
     if (lodKey === 'low') {
       if (chunk.grassLowReady) return false;
 
-      const simpleSamples = this.createGrassSamplesForChunk(chunk, this.grassSparseSpacing, 0.14, 'billboard-low');
+      const simpleSamples = this.createGrassSamplesForChunk(
+        chunk,
+        this.grassDenseSpacing,
+        0.22,
+        'billboard-low',
+        this.grassFarBillboardFrequencyMultiplier
+      );
       chunk.grassLowMesh = this.createGrassInstancedMesh(
         simpleSamples,
         this.grassSimpleGeometry,

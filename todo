@@ -3,3 +3,14 @@
 Add weather. Clouds are randomized with multi-layered perlin noise so that somtimes there are no clouds at all, and sometimes there are a lot of clouds. This cloud "texture" should move across the sky at "weather-speed". Clouds get darker there more there are and when the sky is full of clouds, make it rain.
 
 
+For the second and last LOD of the grass, instead of placing the billboards in a X shape, simply place one isntead of two per isntance and just make them face the player.
+
+
+
+Tree LODs should not be based on chunk distance, but on the distance ot the camera, just like grass LODs.
+
+Improve tree quality:
+At trees closer than 100m:
+Half the size of the "leaves" / leave planes and add 2x more of the leaves instead.
+Trees further than 100m remain the same.
+Also make the trees branch more than once and place them not always perfectly vertical.

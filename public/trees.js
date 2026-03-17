@@ -2,9 +2,10 @@
  * Tree system – procedural birch trees with LOD and instanced rendering.
  *
  * LOD levels:
- *   0  (billboard)   – single camera-facing quad, birch_billboard texture
- *   1  (low)         – minimal 3-D trunk + 1-2 branch quads, low-res textures
- *   2  (medium/high) – procedural trunk with branches and leaf clusters, full-res textures
+ *   0  (billboard)   – far camera-facing quad, lower-res billboard texture
+ *   1  (low)         – mid-distance camera-facing quad, full-res billboard texture
+ *   2  (high)        – standard 3-D tree for 100m-250m range
+ *   3  (near)        – enhanced 3-D tree for the closest 100m range
  *
  * Trees are distributed using Perlin noise so placement is deterministic per seed.
  * The system piggy-backs on TerrainManager's chunk grid for streaming.
@@ -29,9 +30,9 @@ class TreeManager {
     this.maxTreesPerChunk = 10000;   // effectively unlimited – density is controlled by noise
 
     // LOD distances (world units from camera)
-    this.lodBillboardDistance = 600;  // beyond this → billboard
-    this.lodLowDistance = 250;        // beyond this → low-poly
-    this.lodHighDistance = 120;       // beyond this → medium, closer → high detail uses same geo
+    this.lodBillboardDistance = 600;  // beyond this → far billboard
+    this.lodLowDistance = 250;        // beyond this → mid billboard
+    this.lodHighDistance = 100;       // beyond this → standard 3-D, closer → enhanced 3-D
 
     // View distance for tree chunks (in chunks)
     this.treeViewDistance = 8;
@@ -56,14 +57,18 @@ class TreeManager {
     // ── Geometry caches (keyed by seed hash) ───────────────────
     // We pre-build a small palette of tree geometries to instance from.
     this.treePaletteSize = 12;
+    this.nearGeometries = [];
     this.highGeometries = [];   // merged BufferGeometry per palette slot
     this.lowGeometries = [];
     this.paletteDirty = true;
 
     // Reusable helpers
     this._v3 = new THREE.Vector3();
+    this._yAxis = new THREE.Vector3(0, 1, 0);
     this._mat4 = new THREE.Matrix4();
     this._quat = new THREE.Quaternion();
+    this._euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    this._scale = new THREE.Vector3(1, 1, 1);
     this._frustum = new THREE.Frustum();
     this._frustumMatrix = new THREE.Matrix4();
   }
@@ -222,11 +227,13 @@ class TreeManager {
    * Trees in the world simply pick from this palette, avoiding per-tree geometry creation.
    */
   buildGeometryPalette() {
+    this.nearGeometries = [];
     this.highGeometries = [];
     this.lowGeometries = [];
 
     for (let i = 0; i < this.treePaletteSize; i++) {
       const seed = i / this.treePaletteSize;
+      this.nearGeometries.push(this.createTreeGeometry(seed, 'near'));
       this.highGeometries.push(this.createTreeGeometry(seed, 'high'));
       this.lowGeometries.push(this.createTreeGeometry(seed, 'low'));
     }
@@ -238,13 +245,19 @@ class TreeManager {
    */
   createTreeGeometry(seed, lod) {
     const rng = this.seededRandom(seed * 99999 + 7);
+    const isNear = lod === 'near';
+    const isHighDetail = lod === 'high' || isNear;
 
     // Tree parameters (vary with seed)
     const height = 12 + rng() * 10;            // 12-22
     const trunkRadius = 0.25 + rng() * 0.15;   // 0.25-0.40
-    const branchCount = lod === 'high' ? (4 + Math.floor(rng() * 5)) : (2 + Math.floor(rng() * 2));
-    const trunkSegments = lod === 'high' ? 6 : 3;
-    const trunkRadialSegments = lod === 'high' ? 5 : 3;
+    const branchCount = isNear
+      ? (6 + Math.floor(rng() * 6))
+      : lod === 'high'
+        ? (4 + Math.floor(rng() * 5))
+        : (2 + Math.floor(rng() * 2));
+    const trunkSegments = isNear ? 8 : lod === 'high' ? 6 : 3;
+    const trunkRadialSegments = isNear ? 6 : lod === 'high' ? 5 : 3;
 
     // ── TRUNK ──
     const trunkGeo = this.createTrunkGeometry(
@@ -262,44 +275,31 @@ class TreeManager {
       const t = (b + 0.5) / branchCount;
       const branchY = crownBase + (crownTop - crownBase) * t;
       const angle = (b / branchCount) * Math.PI * 2 + rng() * 1.2;
-      const branchLength = (1.5 + rng() * 3) * (1 - t * 0.4);
-      const branchPitch = 0.3 + rng() * 0.5; // upward angle
+      const branchLength = (isNear ? (2.4 + rng() * 3.8) : (1.5 + rng() * 3)) * (1 - t * 0.4);
+      const branchPitch = (isNear ? 0.22 : 0.3) + rng() * (isNear ? 0.45 : 0.5); // upward angle
 
-      // Branch stick (thin so leaves dominate the look)
-      if (lod === 'high') {
-        const brGeo = this.createBranchGeometry(
-          branchY, angle, branchPitch, branchLength, trunkRadius * 0.25, rng
-        );
-        branchGeos.push(brGeo);
-      }
-
-      // Leaf cluster at branch tip
-      const tipX = Math.cos(angle) * Math.cos(branchPitch) * branchLength;
-      const tipY = branchY + Math.sin(branchPitch) * branchLength;
-      const tipZ = Math.sin(angle) * Math.cos(branchPitch) * branchLength;
-
-      // Place leaf quads along the branch, not just at the tip
-      const leafCount = lod === 'high' ? (3 + Math.floor(rng() * 3)) : (1 + Math.floor(rng() * 2));
-      for (let l = 0; l < leafCount; l++) {
-        const along = 0.3 + (l / leafCount) * 0.7; // spread from mid-branch to tip
-        const leafSize = lod === 'high' ? (3 + rng() * 2.5) : (5 + rng() * 3);
-        const lx = tipX * along + (rng() - 0.5) * 2.5;
-        const ly = (branchY + (tipY - branchY) * along) + (rng() - 0.5) * 1.5;
-        const lz = tipZ * along + (rng() - 0.5) * 2.5;
-        const rotation = rng() * Math.PI;
-        leafQuads.push(
-          this.createLeafQuad(lx, ly, lz, leafSize, rotation, rng)
-        );
-      }
+      this.addBranchSystem(branchGeos, leafQuads, {
+        baseX: 0,
+        baseY: branchY,
+        baseZ: 0,
+        angle,
+        pitch: branchPitch,
+        length: branchLength,
+        radius: trunkRadius * (isNear ? 0.22 : 0.25),
+        lod,
+        depth: isNear ? 2 : 1,
+        rng,
+      });
     }
 
     // Add top canopy cluster
-    const topLeafSize = lod === 'high' ? (4 + rng() * 3) : (7 + rng() * 4);
-    const topLeafCount = lod === 'high' ? 4 : 2;
+    const topLeafSize = (isHighDetail ? (4 + rng() * 3) : (7 + rng() * 4)) * (isNear ? 0.5 : 1);
+    const topLeafCount = isNear ? 8 : lod === 'high' ? 4 : 2;
     for (let t = 0; t < topLeafCount; t++) {
-      const ox = (rng() - 0.5) * 3;
-      const oy = crownTop + rng() * 1.5;
-      const oz = (rng() - 0.5) * 3;
+      const spread = isNear ? 3.8 : 3;
+      const ox = (rng() - 0.5) * spread;
+      const oy = crownTop + rng() * (isNear ? 2.0 : 1.5);
+      const oz = (rng() - 0.5) * spread;
       leafQuads.push(this.createLeafQuad(ox, oy, oz, topLeafSize, rng() * Math.PI, rng));
     }
 
@@ -316,6 +316,89 @@ class TreeManager {
     leafQuads.forEach(g => g.dispose());
 
     return { trunk: mergedTrunk, leaves: mergedLeaves, height };
+  }
+
+  addBranchSystem(branchGeos, leafQuads, options) {
+    const {
+      baseX,
+      baseY,
+      baseZ,
+      angle,
+      pitch,
+      length,
+      radius,
+      lod,
+      depth,
+      rng,
+    } = options;
+
+    const isNear = lod === 'near';
+    const isHighDetail = lod === 'high' || isNear;
+
+    if (isHighDetail) {
+      branchGeos.push(
+        this.createBranchGeometry(baseX, baseY, baseZ, angle, pitch, length, radius, rng)
+      );
+    }
+
+    const tip = this.getBranchEndpoint(baseX, baseY, baseZ, angle, pitch, length);
+    const baseLeafCount = isHighDetail
+      ? (3 + Math.floor(rng() * 3))
+      : (1 + Math.floor(rng() * 2));
+    const leafCount = isNear ? baseLeafCount * 2 : baseLeafCount;
+    const leafJitter = isNear ? 1.4 : 2.5;
+    const leafHeightJitter = isNear ? 0.8 : 1.5;
+
+    for (let l = 0; l < leafCount; l++) {
+      const along = 0.25 + (l / Math.max(leafCount - 1, 1)) * 0.75;
+      const baseLeafSize = isHighDetail ? (3 + rng() * 2.5) : (5 + rng() * 3);
+      const leafSize = baseLeafSize * (isNear ? 0.5 : 1);
+      const lx = baseX + (tip.x - baseX) * along + (rng() - 0.5) * leafJitter;
+      const ly = baseY + (tip.y - baseY) * along + (rng() - 0.5) * leafHeightJitter;
+      const lz = baseZ + (tip.z - baseZ) * along + (rng() - 0.5) * leafJitter;
+      leafQuads.push(
+        this.createLeafQuad(lx, ly, lz, leafSize, rng() * Math.PI, rng)
+      );
+    }
+
+    if (!isNear || depth <= 1) return;
+
+    const childBranchCount = 1 + Math.floor(rng() * 2);
+    for (let i = 0; i < childBranchCount; i++) {
+      const along = 0.35 + rng() * 0.4;
+      const childBaseX = baseX + (tip.x - baseX) * along;
+      const childBaseY = baseY + (tip.y - baseY) * along;
+      const childBaseZ = baseZ + (tip.z - baseZ) * along;
+      const childAngle = angle + (rng() > 0.5 ? 1 : -1) * (0.35 + rng() * 0.85);
+      const childPitch = pitch * (0.45 + rng() * 0.2) + 0.08 + rng() * 0.25;
+      const childLength = length * (0.3 + rng() * 0.25);
+      const childRadius = radius * (0.45 + rng() * 0.18);
+
+      this.addBranchSystem(branchGeos, leafQuads, {
+        baseX: childBaseX,
+        baseY: childBaseY,
+        baseZ: childBaseZ,
+        angle: childAngle,
+        pitch: childPitch,
+        length: childLength,
+        radius: childRadius,
+        lod,
+        depth: depth - 1,
+        rng,
+      });
+    }
+  }
+
+  getBranchEndpoint(baseX, baseY, baseZ, angle, pitch, length) {
+    const dirX = Math.cos(angle) * Math.cos(pitch);
+    const dirY = Math.sin(pitch);
+    const dirZ = Math.sin(angle) * Math.cos(pitch);
+
+    return {
+      x: baseX + dirX * length,
+      y: baseY + dirY * length,
+      z: baseZ + dirZ * length,
+    };
   }
 
   createTrunkGeometry(height, radius, heightSegments, radialSegments, rng) {
@@ -359,7 +442,7 @@ class TreeManager {
     return geo;
   }
 
-  createBranchGeometry(baseY, angle, pitch, length, radius, rng) {
+  createBranchGeometry(baseX, baseY, baseZ, angle, pitch, length, radius, rng) {
     // Simple 3-segment tube
     const segments = 2;
     const radial = 3;
@@ -386,9 +469,9 @@ class TreeManager {
 
     for (let is = 0; is <= segments; is++) {
       const t = is / segments;
-      const px = dirX * length * t;
+      const px = baseX + dirX * length * t;
       const py = baseY + dirY * length * t;
-      const pz = dirZ * length * t;
+      const pz = baseZ + dirZ * length * t;
       const r = radius * (1 - t * 0.7);
 
       for (let ir = 0; ir < radial; ir++) {
@@ -583,7 +666,10 @@ class TreeManager {
         // Rotation
         const rotY = hash * Math.PI * 2;
 
-        trees.push({ wx, wz, height, paletteIdx, scale, rotY });
+        const leanX = (this.hashTreeSeed(wx * 11.9, wz * -17.3) - 0.5) * 0.16;
+        const leanZ = (this.hashTreeSeed(wx * -14.7, wz * 9.1) - 0.5) * 0.16;
+
+        trees.push({ wx, wz, height, paletteIdx, scale, rotY, leanX, leanZ });
 
         if (trees.length >= this.maxTreesPerChunk) break;
       }
@@ -605,13 +691,13 @@ class TreeManager {
 
     const trees = chunk.trees;
 
-    if (lod === 'billboard') {
+    if (lod === 'billboard' || lod === 'low') {
       return this.createBillboardInstances(trees, chunk.distSq);
     }
 
-    const geoPalette = lod === 'high' ? this.highGeometries : this.lowGeometries;
-    const trunkMat = lod === 'high' ? this.trunkMaterialHigh : this.trunkMaterialLow;
-    const leafMat = lod === 'high' ? this.leafMaterialHigh : this.leafMaterialLow;
+    const geoPalette = lod === 'near' ? this.nearGeometries : this.highGeometries;
+    const trunkMat = this.trunkMaterialHigh;
+    const leafMat = this.leafMaterialHigh;
 
     // Group trees by palette index for instancing
     const byPalette = new Map();
@@ -637,12 +723,7 @@ class TreeManager {
 
         for (let i = 0; i < paletteTrees.length; i++) {
           const t = paletteTrees[i];
-          quat.setFromAxisAngle(this._v3.set(0, 1, 0), t.rotY);
-          mat4.compose(
-            this._v3.set(t.wx, t.height, t.wz),
-            quat,
-            new THREE.Vector3(t.scale, t.scale, t.scale)
-          );
+          this.composeTreeMatrix(mat4, quat, t, lod, t.rotY);
           trunkMesh.setMatrixAt(i, mat4);
         }
         trunkMesh.instanceMatrix.needsUpdate = true;
@@ -658,12 +739,7 @@ class TreeManager {
 
         for (let i = 0; i < paletteTrees.length; i++) {
           const t = paletteTrees[i];
-          quat.setFromAxisAngle(this._v3.set(0, 1, 0), t.rotY);
-          mat4.compose(
-            this._v3.set(t.wx, t.height, t.wz),
-            quat,
-            new THREE.Vector3(t.scale, t.scale, t.scale)
-          );
+          this.composeTreeMatrix(mat4, quat, t, lod, t.rotY);
           leafMesh.setMatrixAt(i, mat4);
         }
         leafMesh.instanceMatrix.needsUpdate = true;
@@ -672,6 +748,21 @@ class TreeManager {
     }
 
     return group;
+  }
+
+  composeTreeMatrix(mat4, quat, tree, lod, rotY) {
+    if (lod === 'near') {
+      this._euler.set(tree.leanX || 0, rotY, tree.leanZ || 0, 'YXZ');
+      quat.setFromEuler(this._euler);
+    } else {
+      quat.setFromAxisAngle(this._yAxis, rotY);
+    }
+
+    mat4.compose(
+      this._v3.set(tree.wx, tree.height, tree.wz),
+      quat,
+      this._scale.set(tree.scale, tree.scale, tree.scale)
+    );
   }
 
   createBillboardInstances(trees, distSq) {
@@ -684,16 +775,14 @@ class TreeManager {
 
     const mesh = new THREE.InstancedMesh(this.billboardGeo, mat, trees.length);
     mesh.frustumCulled = false;
+    mesh.userData.isTreeBillboard = true;
     const mat4 = this._mat4;
+    const quat = this._quat;
 
     for (let i = 0; i < trees.length; i++) {
       const t = trees[i];
       // Billboard – always face camera Y rotation: we set the rotation each frame
-      mat4.compose(
-        this._v3.set(t.wx, t.height, t.wz),
-        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), t.rotY),
-        new THREE.Vector3(t.scale, t.scale, t.scale)
-      );
+      this.composeTreeMatrix(mat4, quat, t, 'billboard', t.rotY);
       mesh.setMatrixAt(i, mat4);
     }
     mesh.instanceMatrix.needsUpdate = true;
@@ -705,10 +794,8 @@ class TreeManager {
    */
   updateBillboards(cameraPosition) {
     for (const [, chunk] of this.treeChunks) {
-      if (chunk.currentLod !== 'billboard' || !chunk.meshGroup) continue;
-
       const mesh = chunk.meshGroup;
-      if (!mesh.isInstancedMesh) continue;
+      if (!mesh || !mesh.isInstancedMesh || !mesh.userData.isTreeBillboard) continue;
 
       const camAngle = Math.atan2(
         cameraPosition.x - chunk.centerX,
@@ -720,12 +807,7 @@ class TreeManager {
 
       for (let i = 0; i < chunk.trees.length; i++) {
         const t = chunk.trees[i];
-        quat.setFromAxisAngle(this._v3.set(0, 1, 0), camAngle);
-        mat4.compose(
-          this._v3.set(t.wx, t.height, t.wz),
-          quat,
-          new THREE.Vector3(t.scale, t.scale, t.scale)
-        );
+        this.composeTreeMatrix(mat4, quat, t, 'billboard', camAngle);
         mesh.setMatrixAt(i, mat4);
       }
       mesh.instanceMatrix.needsUpdate = true;
@@ -739,7 +821,8 @@ class TreeManager {
   getLodForDistance(dist) {
     if (dist > this.lodBillboardDistance) return 'billboard';
     if (dist > this.lodLowDistance) return 'low';
-    return 'high';
+    if (dist > this.lodHighDistance) return 'high';
+    return 'near';
   }
 
   getChunkCenterDistSq(cx, cz, playerX, playerZ) {
@@ -923,6 +1006,10 @@ class TreeManager {
     this.treeChunks.clear();
 
     // Dispose palette geometries
+    for (const g of this.nearGeometries) {
+      if (g.trunk) g.trunk.dispose();
+      if (g.leaves) g.leaves.dispose();
+    }
     for (const g of this.highGeometries) {
       if (g.trunk) g.trunk.dispose();
       if (g.leaves) g.leaves.dispose();

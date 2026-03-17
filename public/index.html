@@ -180,6 +180,20 @@
 
     .play-btn:hover { transform: scale(1.05); }
 
+    .play-btn:disabled,
+    .logout-btn:disabled {
+      opacity: 0.65;
+      cursor: wait;
+      transform: none;
+    }
+
+    .lobby-status {
+      min-height: 20px;
+      color: #ff9da5;
+      font-size: 0.85rem;
+      margin-bottom: 16px;
+    }
+
     .logout-btn {
       padding: 8px 24px;
       border: 1px solid rgba(255,255,255,0.2);
@@ -207,6 +221,103 @@
       height: 100%;
     }
 
+    #loading-screen {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background:
+        radial-gradient(circle at top, rgba(0, 210, 255, 0.14), transparent 45%),
+        rgba(6, 10, 20, 0.92);
+      backdrop-filter: blur(18px);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 0.18s ease, visibility 0.18s ease;
+      z-index: 30;
+    }
+
+    #loading-screen.visible {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+    }
+
+    .loading-panel {
+      width: min(420px, calc(100vw - 32px));
+      padding: 32px 30px 28px;
+      border-radius: 20px;
+      background: rgba(15, 20, 34, 0.9);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
+      text-align: center;
+    }
+
+    .loading-spinner {
+      width: 54px;
+      height: 54px;
+      margin: 0 auto 18px;
+      border-radius: 50%;
+      border: 4px solid rgba(255,255,255,0.12);
+      border-top-color: #00d2ff;
+      border-right-color: #7b2ff7;
+      animation: loading-spin 0.95s linear infinite;
+    }
+
+    .loading-kicker {
+      color: #86dfff;
+      font-size: 0.75rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .loading-title {
+      font-size: 1.55rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    #loading-status {
+      color: #b6bfd4;
+      font-size: 0.95rem;
+      min-height: 1.4em;
+      margin-bottom: 18px;
+    }
+
+    .loading-progress-bar {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.08);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
+    }
+
+    #loading-progress-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #00d2ff, #7b2ff7);
+      transition: width 0.2s ease;
+    }
+
+    #loading-progress-value {
+      margin-top: 12px;
+      color: #8f9ab3;
+      font-size: 0.85rem;
+      font-family: monospace;
+      letter-spacing: 0.08em;
+    }
+
+    @keyframes loading-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
     /* HUD */
     #hud {
       position: absolute;
@@ -226,6 +337,17 @@
       gap: 12px;
       align-items: center;
       pointer-events: auto;
+    }
+
+    #fps-counter {
+      background: rgba(0,0,0,0.5);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      color: #aaa;
+      font-family: monospace;
+      min-width: 32px;
+      text-align: right;
     }
 
     #player-count {
@@ -422,6 +544,202 @@
 
     #phone-root.no-anim {
       transition: none;
+    }
+
+    /* Debug Menu */
+    #debug-menu {
+      position: absolute;
+      top: 24px;
+      right: 24px;
+      display: none;
+      z-index: 45;
+      pointer-events: none;
+    }
+
+    #debug-menu.open {
+      display: block;
+      pointer-events: auto;
+    }
+
+    .debug-panel {
+      width: min(420px, calc(100vw - 48px));
+      padding: 18px 18px 16px;
+      border-radius: 16px;
+      background: rgba(12, 18, 28, 0.94);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 18px 42px rgba(0,0,0,0.38);
+      backdrop-filter: blur(16px);
+      max-height: min(82vh, 760px);
+      overflow-y: auto;
+    }
+
+    .debug-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .debug-kicker {
+      color: #86dfff;
+      font-size: 0.72rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .debug-title {
+      color: #fff;
+      font-size: 1.15rem;
+      font-weight: 700;
+    }
+
+    .debug-close-btn,
+    .debug-reset-btn {
+      border-radius: 8px;
+      cursor: pointer;
+      transition: opacity 0.18s ease;
+    }
+
+    .debug-close-btn:hover,
+    .debug-reset-btn:hover {
+      opacity: 0.88;
+    }
+
+    .debug-close-btn {
+      padding: 8px 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.06);
+      color: #f0f4ff;
+    }
+
+    .debug-status {
+      margin-bottom: 16px;
+      color: #b8c4dd;
+      font-size: 0.82rem;
+    }
+
+    .debug-control {
+      margin-bottom: 14px;
+    }
+
+    .debug-control label {
+      display: block;
+      margin-bottom: 6px;
+      color: #e8ecf7;
+      font-size: 0.9rem;
+    }
+
+    .debug-control input[type="range"] {
+      width: 100%;
+      accent-color: #7b2ff7;
+      cursor: pointer;
+    }
+
+    .debug-value {
+      margin-top: 6px;
+      color: #8fdfff;
+      font-size: 0.84rem;
+      font-family: monospace;
+      letter-spacing: 0.05em;
+    }
+
+    .debug-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .debug-section-title {
+      margin: 18px 0 10px;
+      color: #7ea1d8;
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .debug-lod-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .debug-lod-card {
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.035);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .debug-lod-title {
+      color: #f4f7ff;
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    .debug-input-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 120px;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .debug-input-row:last-of-type {
+      margin-bottom: 0;
+    }
+
+    .debug-input-row label,
+    .debug-static-label {
+      color: #dbe5f8;
+      font-size: 0.84rem;
+    }
+
+    .debug-number-input {
+      width: 100%;
+      padding: 7px 9px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(3, 8, 16, 0.7);
+      color: #f0f6ff;
+      font: inherit;
+    }
+
+    .debug-number-input:focus {
+      outline: none;
+      border-color: #7b2ff7;
+      box-shadow: 0 0 0 1px rgba(123,47,247,0.25);
+    }
+
+    .debug-static-value {
+      color: #7f8ba3;
+      font-size: 0.82rem;
+      text-align: right;
+    }
+
+    .debug-lod-note {
+      margin-top: 8px;
+      color: #8ea1bf;
+      font-size: 0.76rem;
+      line-height: 1.4;
+    }
+
+    .debug-reset-btn {
+      padding: 9px 12px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.04);
+      color: #d9e4ff;
+    }
+
+    .debug-hint {
+      color: #7f8ba3;
+      font-size: 0.78rem;
+      text-align: right;
     }
 
     .phone-shell {
@@ -991,12 +1309,23 @@
       cursor: pointer;
     }
 
+    .settings-checkbox {
+      width: 18px;
+      height: 18px;
+      accent-color: #7b2ff7;
+      cursor: pointer;
+    }
+
     .range-val {
       color: #aaa;
       font-size: 0.8rem;
       min-width: 34px;
       text-align: right;
       font-family: monospace;
+    }
+
+    .range-val-wide {
+      min-width: 92px;
     }
 
     .keybind-btn {
@@ -1091,8 +1420,21 @@
       </div>
       <p class="character-label">Default Character</p>
       <button class="play-btn" id="play-btn">Enter World</button>
-      <br>
+      <p class="lobby-status" id="lobby-status"></p>
       <button class="logout-btn" id="lobby-logout">Logout</button>
+    </div>
+  </div>
+
+  <div id="loading-screen" aria-hidden="true">
+    <div class="loading-panel" role="status" aria-live="polite">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <div class="loading-kicker">Joining Session</div>
+      <div class="loading-title">Loading World</div>
+      <div id="loading-status">Preparing world…</div>
+      <div class="loading-progress-bar" aria-hidden="true">
+        <div id="loading-progress-fill"></div>
+      </div>
+      <div id="loading-progress-value">0%</div>
     </div>
   </div>
 
@@ -1101,6 +1443,7 @@
     <canvas id="game-canvas"></canvas>
     <div id="hud">
       <div id="hud-top">
+        <div id="fps-counter">-- FPS</div>
         <div id="player-count">Players: 1</div>
         <button id="hud-logout">Leave</button>
       </div>
@@ -1116,6 +1459,40 @@
       <div id="player-names"></div>
       <div id="lock-prompt" style="display:none;">Click to play &mdash; Esc to pause</div>
       <div id="phone-hint">Phone: <span id="phone-keybind-hint">P</span></div>
+    </div>
+
+    <div id="debug-menu" aria-hidden="true">
+      <div class="debug-panel">
+        <div class="debug-header">
+          <div>
+            <div class="debug-kicker">Debug</div>
+            <div class="debug-title">Time Controls</div>
+          </div>
+          <button id="debug-menu-close" class="debug-close-btn" type="button">Close</button>
+        </div>
+
+        <div id="debug-time-source" class="debug-status">Following server time</div>
+
+        <div class="debug-control">
+          <label for="debug-time-slider">Time of Day</label>
+          <input id="debug-time-slider" type="range" min="0" max="1439" step="1" value="389">
+          <div id="debug-time-value" class="debug-value">06:29</div>
+        </div>
+
+        <div class="debug-control">
+          <label for="debug-speed-slider">Day Cycle Speed</label>
+          <input id="debug-speed-slider" type="range" min="0" max="20" step="0.1" value="1">
+          <div id="debug-speed-value" class="debug-value">1.0× · 120.0 min/day</div>
+        </div>
+
+        <div class="debug-section-title">Terrain LOD</div>
+        <div id="debug-lod-controls" class="debug-lod-list"></div>
+
+        <div class="debug-actions">
+          <button id="debug-time-reset" class="debug-reset-btn" type="button">Sync Server</button>
+          <div class="debug-hint">Press Enter to toggle</div>
+        </div>
+      </div>
     </div>
 
     <div id="phone-root" aria-hidden="true">
@@ -1197,6 +1574,17 @@
           <label>Sensitivity</label>
           <input type="range" id="sens-slider" min="0.0002" max="0.004" step="0.0001">
           <span class="range-val" id="sens-val">1.0</span>
+        </div>
+
+        <div class="settings-section-title">Graphics</div>
+        <div class="settings-row">
+          <label>Render Distance</label>
+          <input type="range" id="render-distance-slider" min="2" max="50" step="1">
+          <span class="range-val range-val-wide" id="render-distance-val">7×7 chunks</span>
+        </div>
+        <div class="settings-row">
+          <label for="grass-toggle">Grass Blades</label>
+          <input type="checkbox" id="grass-toggle" class="settings-checkbox" checked>
         </div>
 
         <div class="settings-section-title">Keybinds</div>

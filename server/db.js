@@ -13,6 +13,17 @@ db.exec(`
     password TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS player_positions (
+    user_id INTEGER PRIMARY KEY,
+    x REAL NOT NULL DEFAULT 0,
+    y REAL NOT NULL DEFAULT 50,
+    z REAL NOT NULL DEFAULT 0,
+    rx REAL NOT NULL DEFAULT 0,
+    ry REAL NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
 `);
 
 module.exports = db;

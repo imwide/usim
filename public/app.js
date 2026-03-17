@@ -11,9 +11,14 @@
   const authSubmit   = document.getElementById('auth-submit');
   const tabs         = document.querySelectorAll('.auth-tab');
   const lobbyUsername= document.getElementById('lobby-username');
+  const lobbyStatus  = document.getElementById('lobby-status');
   const playBtn      = document.getElementById('play-btn');
   const lobbyLogout  = document.getElementById('lobby-logout');
   const hudLogout    = document.getElementById('hud-logout');
+  const loadingScreen = document.getElementById('loading-screen');
+  const loadingStatus = document.getElementById('loading-status');
+  const loadingProgressFill = document.getElementById('loading-progress-fill');
+  const loadingProgressValue = document.getElementById('loading-progress-value');
 
   // Pause menu
   const pauseMenu       = document.getElementById('pause-menu');
@@ -26,6 +31,9 @@
   const settingsMenu    = document.getElementById('settings-menu');
   const sensSlider      = document.getElementById('sens-slider');
   const sensVal         = document.getElementById('sens-val');
+  const renderSlider    = document.getElementById('render-distance-slider');
+  const renderVal       = document.getElementById('render-distance-val');
+  const grassToggle     = document.getElementById('grass-toggle');
   const settingsReset   = document.getElementById('settings-reset');
   const settingsClose   = document.getElementById('settings-close');
   const keybindBtns     = document.querySelectorAll('.keybind-btn');
@@ -36,6 +44,7 @@
   let game        = null;
   let characterPreview = null;
   let characterPreviewLoad = null;
+  let isStartingGame = false;
 
   // ---- Helpers ----------------------------------------------------------------
 
@@ -54,6 +63,47 @@
     if (code.startsWith('Digit')) return code.slice(5);
     if (code.startsWith('Numpad')) return 'Num' + code.slice(6);
     return code;
+  }
+
+  function waitForNextPaint() {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+  }
+
+  function setLobbyStatus(message = '') {
+    if (lobbyStatus) {
+      lobbyStatus.textContent = message;
+    }
+  }
+
+  function updateLoadingScreen(message, progress = 0) {
+    if (loadingStatus) {
+      loadingStatus.textContent = message || 'Preparing world…';
+    }
+
+    const safeProgress = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+    if (loadingProgressFill) {
+      loadingProgressFill.style.width = `${safeProgress}%`;
+    }
+    if (loadingProgressValue) {
+      loadingProgressValue.textContent = `${safeProgress}%`;
+    }
+  }
+
+  function showLoadingScreen(message = 'Preparing world…', progress = 0) {
+    updateLoadingScreen(message, progress);
+    if (loadingScreen) {
+      loadingScreen.classList.add('visible');
+      loadingScreen.setAttribute('aria-hidden', 'false');
+    }
+  }
+
+  function hideLoadingScreen() {
+    if (loadingScreen) {
+      loadingScreen.classList.remove('visible');
+      loadingScreen.setAttribute('aria-hidden', 'true');
+    }
   }
 
   // ---- Auth -------------------------------------------------------------------
@@ -106,19 +156,23 @@
 
   function showAuth() {
     stopCharacterPreview();
+    hideLoadingScreen();
     authScreen.style.display  = 'flex';
     lobbyScreen.style.display = 'none';
     gameScreen.style.display  = 'none';
     authError.textContent = '';
+    setLobbyStatus('');
     document.getElementById('username').value = '';
     document.getElementById('password').value = '';
   }
 
   function showLobby() {
+    hideLoadingScreen();
     authScreen.style.display  = 'none';
     lobbyScreen.style.display = 'flex';
     gameScreen.style.display  = 'none';
     lobbyUsername.textContent = currentUser.username;
+    setLobbyStatus('');
     drawCharacterPreview();
   }
 
@@ -275,10 +329,48 @@
 
   // ---- Play / Leave -----------------------------------------------------------
 
-  playBtn.addEventListener('click', () => {
-    showGame();
-    game = new Game();
-    game.start(currentUser.username, authToken);
+  playBtn.addEventListener('click', async () => {
+    if (isStartingGame || !currentUser) return;
+
+    isStartingGame = true;
+    playBtn.disabled = true;
+    lobbyLogout.disabled = true;
+    setLobbyStatus('');
+    showLoadingScreen('Preparing world…', 6);
+
+    try {
+      await waitForNextPaint();
+      showGame();
+
+      updateLoadingScreen('Creating renderer…', 18);
+      await waitForNextPaint();
+
+      game = new Game();
+
+      updateLoadingScreen('Building world systems…', 42);
+      await waitForNextPaint();
+
+      await game.start(currentUser.username, authToken, currentUser.id, async (message, progress) => {
+        updateLoadingScreen(message, progress);
+        await waitForNextPaint();
+      });
+
+      updateLoadingScreen('Entering world…', 100);
+      await waitForNextPaint();
+    } catch (error) {
+      console.error('Failed to enter world:', error);
+      if (game) {
+        game.stop();
+        game = null;
+      }
+      showLobby();
+      setLobbyStatus('Unable to enter the world right now. Please try again.');
+    } finally {
+      hideLoadingScreen();
+      playBtn.disabled = false;
+      lobbyLogout.disabled = false;
+      isStartingGame = false;
+    }
   });
 
   async function logout() {
@@ -329,12 +421,19 @@
     // Deep-copy current settings as working copy
     pendingSettings = {
       sensitivity: game.settings.sensitivity,
+      renderDistance: game.settings.renderDistance,
+      renderGrassBlades: game.settings.renderGrassBlades,
       keybinds: { ...game.settings.keybinds },
     };
 
     // Populate slider
     sensSlider.value = pendingSettings.sensitivity;
     updateSensLabel(pendingSettings.sensitivity);
+    renderSlider.value = pendingSettings.renderDistance;
+    updateRenderDistanceLabel(pendingSettings.renderDistance);
+    if (grassToggle) {
+      grassToggle.checked = pendingSettings.renderGrassBlades !== false;
+    }
 
     // Populate keybind buttons
     keybindBtns.forEach(btn => {
@@ -351,11 +450,30 @@
     sensVal.textContent = (val / 0.001).toFixed(2) + 'x';
   }
 
+  function updateRenderDistanceLabel(val) {
+    const distance = Game.normalizeRenderDistance(val);
+    const diameter = distance * 2 + 1;
+    renderVal.textContent = `${diameter}×${diameter} chunks`;
+  }
+
   sensSlider.addEventListener('input', () => {
     const v = parseFloat(sensSlider.value);
     pendingSettings.sensitivity = v;
     updateSensLabel(v);
   });
+
+  renderSlider.addEventListener('input', () => {
+    const v = Game.normalizeRenderDistance(renderSlider.value);
+    pendingSettings.renderDistance = v;
+    updateRenderDistanceLabel(v);
+  });
+
+  if (grassToggle) {
+    grassToggle.addEventListener('change', () => {
+      if (!pendingSettings) return;
+      pendingSettings.renderGrassBlades = !!grassToggle.checked;
+    });
+  }
 
   // Keybind rebinding
   keybindBtns.forEach(btn => {
@@ -416,10 +534,17 @@
     listeningBtn = null;
     const def = Game.defaultSettings();
     pendingSettings.sensitivity = def.sensitivity;
+    pendingSettings.renderDistance = def.renderDistance;
+    pendingSettings.renderGrassBlades = def.renderGrassBlades;
     pendingSettings.keybinds    = { ...def.keybinds };
 
     sensSlider.value = pendingSettings.sensitivity;
     updateSensLabel(pendingSettings.sensitivity);
+    renderSlider.value = pendingSettings.renderDistance;
+    updateRenderDistanceLabel(pendingSettings.renderDistance);
+    if (grassToggle) {
+      grassToggle.checked = pendingSettings.renderGrassBlades;
+    }
     keybindBtns.forEach(btn => {
       btn.classList.remove('listening');
       btn.textContent = codeToLabel(pendingSettings.keybinds[btn.dataset.action]);

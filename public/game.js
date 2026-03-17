@@ -16,16 +16,39 @@ class Game {
     this.renderer.shadowMap.enabled = false; // disable for performance
 
     // Camera
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
     this.camera.position.set(0, 60, 0);
 
-    // Fog for distance fade
-    this.scene.fog = new THREE.FogExp2(0x87CEEB, 0.0025);
+    // Fog for distance fade – actual density set by syncDistanceRendering()
+    this.scene.fog = new THREE.FogExp2(0x87CEEB, 0.0004);
 
     // Day / night cycle - controlled by server
     this.dayTime = 0.27;   // 0 = midnight, 0.5 = noon (used as fallback)
     this.gameWorldStartTime = null; // Will be set by server
-    this.timeCycleMs = 2 * 60 * 60 * 1000; // 2 real hours = 1 full day cycle
+    this.defaultTimeCycleMs = 2 * 60 * 60 * 1000;
+    this.timeCycleMs = this.defaultTimeCycleMs; // 2 real hours = 1 full day cycle
+    this.lastServerTimeSample = null;
+    this.debugMenuOpen = false;
+    this.debugMenu = {
+      root: null,
+      sourceLabel: null,
+      timeSlider: null,
+      timeValue: null,
+      speedSlider: null,
+      speedValue: null,
+      lodContainer: null,
+      lodControls: [],
+      closeBtn: null,
+      resetBtn: null,
+      timeScrubbing: false,
+      speedScrubbing: false,
+    };
+    this.debugTimeOverride = {
+      active: false,
+      anchorDayTime: this.dayTime,
+      anchorRealTime: Date.now(),
+      speedMultiplier: 1,
+    };
 
     // Sky, sun, moon, stars, lights
     this.setupSky();
@@ -38,7 +61,7 @@ class Game {
     this.waterLevel = 0;
     this.terrain.setWaterLevel(this.waterLevel);
     this.waterTime = 0;
-    this.waterBaseFogDensity = 0.0025;
+    this.waterBaseFogDensity = 0.0008; // overridden by syncDistanceRendering()
     this.underwaterFogDensity = 0.012;
     this.isUnderwater = false;
     this.underwaterDepth = 0;
@@ -49,7 +72,7 @@ class Game {
     this.position = new THREE.Vector3(0, 60, 0);
     this.velocity = new THREE.Vector3(0, 0, 0);
     this.euler = new THREE.Euler(0, 0, 0, 'YXZ');
-    this.moveSpeed = 4;
+    this.moveSpeed = 4; //4 is default
     this.gravity = -50;
     this.jumpSpeed = 15;
     this.onGround = false;
@@ -59,6 +82,7 @@ class Game {
     this.isRunning = false;
     this.isCrouching = false;
     this.isSwimming = false;
+    this.isFlying = false;
     this.isExhausted = false;   // set when stamina hits 0, cleared at recovery threshold
     this.stamina = 10;
     this.maxStamina = 10;
@@ -66,6 +90,9 @@ class Game {
     this.staminaRegenRate = 0.5;
     this.staminaRecoveryThreshold = 2.0; // must regen to this before running again
     this.runSpeedMultiplier = 2.0;
+    this.flightSpeedMultiplier = 20.0;
+    this.flightToggleWindowMs = 300;
+    this.lastJumpTapTime = -Infinity;
     this.crouchCameraOffset = 0;       // current camera height offset (lerped)
     this.crouchSpeedMultiplier = 0.4;
     this.jumpAnimationTimer = 0;
@@ -73,6 +100,9 @@ class Game {
 
     // Settings (loaded from localStorage)
     this.settings = Game.loadSettings();
+    this.terrain.setViewDistance(this.settings.renderDistance);
+    this.terrain.setGrassBladesEnabled(this.settings.renderGrassBlades);
+    this.syncDistanceRendering(true);
 
     // Input
     this.keys = {};
@@ -92,6 +122,15 @@ class Game {
       followPlayer: true,
       centerX: this.position.x,
       centerZ: this.position.z,
+      backgroundCenterX: this.position.x,
+      backgroundCenterZ: this.position.z,
+      backgroundCanvas: null,
+      backgroundCtx: null,
+      backgroundKey: '',
+      terrainRasterCanvas: null,
+      terrainRasterCtx: null,
+      terrainRasterHeights: null,
+      terrainRasterImageData: null,
       canvas: null,
       ctx: null,
       rangeLabel: null,
@@ -116,13 +155,20 @@ class Game {
     this.phoneMapLightDir = new THREE.Vector3(-0.58, 0.72, 0.38).normalize();
 
     this.setupPhoneUI();
+    this.setupDebugMenu();
 
     // Multiplayer
     this.socket = null;
     this.otherPlayers = {};
     this.username = '';
+    this.userId = null;
     this.sendRate = 50; // ms between position updates
     this.lastSendTime = 0;
+
+    // FPS counter
+    this.fps = 0;
+    this.frameCount = 0;
+    this.fpsUpdateTime = 0;
 
     // Resize
     window.addEventListener('resize', () => this.onResize());
@@ -468,6 +514,7 @@ class Game {
     const skyGeo = new THREE.SphereGeometry(900, 32, 15);
     const skyMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
+      depthTest: false,
       depthWrite: false,
       uniforms: {
         topColor:   { value: new THREE.Color(0x020215) },
@@ -492,13 +539,20 @@ class Game {
     });
     this.skyMesh = new THREE.Mesh(skyGeo, skyMat);
     this.skyMesh.frustumCulled = false;
+    this.skyMesh.renderOrder = -1000;
     this.scene.add(this.skyMesh);
 
     // ---- Sun (bright white core) ----
     const sunGeo = new THREE.SphereGeometry(18, 16, 16);
-    const sunMat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false });
+    const sunMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      fog: false,
+      depthTest: false,
+      depthWrite: false,
+    });
     this.sunMesh = new THREE.Mesh(sunGeo, sunMat);
     this.sunMesh.frustumCulled = false;
+    this.sunMesh.renderOrder = -998;
     this.scene.add(this.sunMesh);
 
     // ---- Sun glow layers (additive billboard sprites) ----
@@ -534,6 +588,7 @@ class Game {
       fragmentShader: glowShader.fragmentShader,
       transparent: true,
       blending: THREE.AdditiveBlending,
+      depthTest: true,
       depthWrite: false,
       fog: false,
       side: THREE.DoubleSide,
@@ -541,6 +596,7 @@ class Game {
     this.sunInnerGlow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), innerGlowMat);
     this.sunInnerGlow.scale.set(90, 90, 1);
     this.sunInnerGlow.frustumCulled = false;
+    this.sunInnerGlow.renderOrder = -997;
     this.scene.add(this.sunInnerGlow);
 
     // Outer soft glow (warm tint, larger)
@@ -554,6 +610,7 @@ class Game {
       fragmentShader: glowShader.fragmentShader,
       transparent: true,
       blending: THREE.AdditiveBlending,
+      depthTest: true,
       depthWrite: false,
       fog: false,
       side: THREE.DoubleSide,
@@ -561,6 +618,7 @@ class Game {
     this.sunOuterGlow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), outerGlowMat);
     this.sunOuterGlow.scale.set(200, 200, 1);
     this.sunOuterGlow.frustumCulled = false;
+    this.sunOuterGlow.renderOrder = -997;
     this.scene.add(this.sunOuterGlow);
 
     // Wide atmosphere scatter glow
@@ -574,6 +632,7 @@ class Game {
       fragmentShader: glowShader.fragmentShader,
       transparent: true,
       blending: THREE.AdditiveBlending,
+      depthTest: true,
       depthWrite: false,
       fog: false,
       side: THREE.DoubleSide,
@@ -581,6 +640,7 @@ class Game {
     this.sunScatterGlow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), scatterGlowMat);
     this.sunScatterGlow.scale.set(400, 400, 1);
     this.sunScatterGlow.frustumCulled = false;
+    this.sunScatterGlow.renderOrder = -997;
     this.scene.add(this.sunScatterGlow);
 
     // Keep reference for old code compatibility
@@ -591,18 +651,25 @@ class Game {
 
     // ---- Moon ----
     const moonGeo = new THREE.SphereGeometry(11, 16, 16);
-    const moonMat = new THREE.MeshBasicMaterial({ color: 0xddeeff, fog: false });
+    const moonMat = new THREE.MeshBasicMaterial({
+      color: 0xddeeff,
+      fog: false,
+      depthTest: false,
+      depthWrite: false,
+    });
     this.moonMesh = new THREE.Mesh(moonGeo, moonMat);
     this.moonMesh.frustumCulled = false;
+    this.moonMesh.renderOrder = -998;
     this.scene.add(this.moonMesh);
 
     // ---- Stars ----
     const STAR_COUNT = 3000;
+    const STAR_RADIUS = 850;
     const starPos = new Float32Array(STAR_COUNT * 3);
     for (let i = 0; i < STAR_COUNT; i++) {
       const theta = Math.random() * Math.PI * 2;
       const phi   = Math.acos(2 * Math.random() - 1);
-      const r = 850;
+      const r = STAR_RADIUS;
       starPos[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
       starPos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
       starPos[i * 3 + 2] = r * Math.cos(phi);
@@ -612,11 +679,13 @@ class Game {
     const starMat = new THREE.PointsMaterial({
       color: 0xffffff, size: 1.8,
       sizeAttenuation: false,
-      transparent: true, opacity: 0,
+      depthTest: false,
+      depthWrite: false,
       fog: false
     });
     this.starField = new THREE.Points(starGeo, starMat);
     this.starField.frustumCulled = false;
+    this.starField.renderOrder = -999;
     this.scene.add(this.starField);
 
     // ---- Lights ----
@@ -761,11 +830,7 @@ class Game {
   }
 
   updateSky(dt) {
-    // Calculate day time based on server's world start time
-    if (this.gameWorldStartTime !== null) {
-      const elapsedMs = Date.now() - this.gameWorldStartTime;
-      this.dayTime = (elapsedMs / this.timeCycleMs) % 1.0;
-    }
+    this.dayTime = this.getCurrentDayTime();
     const t = this.dayTime;
 
     // Sun orbit: 0=midnight (below), 0.5=noon (above)
@@ -900,19 +965,37 @@ class Game {
     this.hemiLight.intensity = 0.3 + 0.5 * ambFactor;
 
     // ---- Stars fade in at night ----
-    this.starField.material.opacity = Math.max(0, Math.min(1, -sunElev * 4));
+    const starFade = Math.max(0, Math.min(1, -sunElev * 4));
+    this.starField.visible = starFade > 0.001;
+    this.starField.material.color.setScalar(starFade);
+  }
+
+  getRenderDistanceWorldSpan() {
+    return (this.terrain.viewDistance * 2 + 3) * this.terrain.chunkWorldSize;
+  }
+
+  syncDistanceRendering(forceWaterRebuild = false) {
+    const visibleSpan = this.getRenderDistanceWorldSpan();
+    const diagonalRadius = visibleSpan * Math.SQRT2 * 0.5;
+    const desiredFar = Math.max(4500, diagonalRadius + 2600);
+
+    if (Math.abs(this.camera.far - desiredFar) > 1) {
+      this.camera.far = desiredFar;
+      this.camera.updateProjectionMatrix();
+    }
+
+    // Scale fog density inversely with render distance so fog only
+    // fades terrain near the very edge, preventing the "transparent" look.
+    // FogExp2 visibility at distance d: v = exp(-(density*d)^2)
+    // With K ≈ 0.7 the fog is ~10% at edge, ~85% visibility at midrange.
+    this.waterBaseFogDensity = 0.7 / Math.max(diagonalRadius, 500);
+
+    this.rebuildWaterMeshes(forceWaterRebuild);
   }
 
   setupWater() {
-    this.waterPatchSize = 800;
-    this.waterPatchSnap = 48;
-    this.waterPatchX = null;
-    this.waterPatchZ = null;
-
-    const waterGeo = new THREE.PlaneGeometry(this.waterPatchSize, this.waterPatchSize, 80, 80);
-    waterGeo.rotateX(-Math.PI / 2);
-    waterGeo.setAttribute('waveAmp', new THREE.BufferAttribute(new Float32Array(waterGeo.attributes.position.count), 1));
-
+    this.waterLods = [];
+    this.waterLodSignature = '';
     this.waterUniforms = {
       uTime: { value: 0 },
       uColor: { value: new THREE.Color(0x2564a8) },
@@ -924,11 +1007,13 @@ class Game {
     const waterMat = new THREE.ShaderMaterial({
       uniforms: this.waterUniforms,
       transparent: true,
-      depthWrite: false,
+      depthTest: true,
+      depthWrite: true,
       side: THREE.FrontSide,
       vertexShader: `
         uniform float uTime;
         attribute float waveAmp;
+        attribute float waveMotion;
         varying vec3 vWorldPos;
         varying vec3 vNormal;
         varying float vWaveAmp;
@@ -939,17 +1024,17 @@ class Game {
           float waveA = sin(worldP.x * 0.055 + uTime * 1.35) * 0.5;
           float waveB = cos(worldP.z * 0.07 - uTime * 1.1) * 0.35;
           float waveC = sin((worldP.x + worldP.z) * 0.03 + uTime * 1.6) * 0.15;
-          float wave = (waveA + waveB + waveC) * waveAmp;
+          float wave = (waveA + waveB + waveC) * waveMotion;
           worldP.y += wave;
 
           float dx = (
             0.055 * 0.5 * cos(worldP.x * 0.055 + uTime * 1.35) +
             0.03 * 0.15 * cos((worldP.x + worldP.z) * 0.03 + uTime * 1.6)
-          ) * waveAmp;
+          ) * waveMotion;
           float dz = (
             -0.07 * 0.35 * sin(worldP.z * 0.07 - uTime * 1.1) +
             0.03 * 0.15 * cos((worldP.x + worldP.z) * 0.03 + uTime * 1.6)
-          ) * waveAmp;
+          ) * waveMotion;
 
           vWorldPos = worldP.xyz;
           vNormal = normalize(vec3(-dx, 1.0, -dz));
@@ -983,11 +1068,8 @@ class Game {
       `
     });
 
-    this.waterMesh = new THREE.Mesh(waterGeo, waterMat);
-    this.waterMesh.position.y = this.waterLevel;
-    this.waterMesh.frustumCulled = false;
-    this.scene.add(this.waterMesh);
-    this.updateWaterPatch(true);
+    this.waterMaterial = waterMat;
+    this.rebuildWaterMeshes(true);
   }
 
   setupUnderwaterPostFX() {
@@ -1076,31 +1158,204 @@ class Game {
     return this.waterLevel + this.getWaterWaveOffset(worldX, worldZ);
   }
 
+  getWaterLodConfigs() {
+    const visibleSpan = this.getRenderDistanceWorldSpan();
+    const roundUp = (value, step) => Math.ceil(value / step) * step;
+
+    const nearSize = roundUp(Math.max(800, Math.min(visibleSpan * 0.16, 1408)), 32);
+    const midSize = roundUp(Math.max(nearSize + 512, Math.min(visibleSpan * 0.42, 4096)), 64);
+    const farSize = roundUp(Math.max(midSize + 1024, Math.min(visibleSpan * 0.82, 9216)), 128);
+    const horizonSize = roundUp(
+      Math.max(farSize + 2048, Math.min(visibleSpan * 1.1, this.camera.far * 1.2)),
+      256
+    );
+
+    return [
+      {
+        key: 'near',
+        size: nearSize,
+        innerSize: 0,
+        segments: 80,
+        snap: 48,
+        waveVisualScale: 1.0,
+        waveMotionScale: 1.0,
+        renderOrder: 30,
+      },
+      {
+        key: 'mid',
+        size: midSize,
+        innerSize: nearSize,
+        segments: 36,
+        snap: 48,
+        waveVisualScale: 0.68,
+        waveMotionScale: 0.45,
+        renderOrder: 29,
+      },
+      {
+        key: 'far',
+        size: farSize,
+        innerSize: midSize,
+        segments: 18,
+        snap: 48,
+        waveVisualScale: 0.42,
+        waveMotionScale: 0.18,
+        renderOrder: 28,
+      },
+      {
+        key: 'horizon',
+        size: horizonSize,
+        innerSize: farSize,
+        segments: 6,
+        snap: 48,
+        waveVisualScale: 0.55,
+        waveMotionScale: 0.0,
+        renderOrder: 27,
+      },
+    ];
+  }
+
+  createWaterRingGeometry(size, segments, innerSize = 0) {
+    const geometry = new THREE.BufferGeometry();
+    const vertexCount = (segments + 1) * (segments + 1);
+    const positions = new Float32Array(vertexCount * 3);
+    const waveAmp = new Float32Array(vertexCount);
+    const waveMotion = new Float32Array(vertexCount);
+    const indices = [];
+    const halfSize = size * 0.5;
+    const step = size / segments;
+    const innerHalf = innerSize * 0.5;
+
+    let vertexIndex = 0;
+    for (let iz = 0; iz <= segments; iz++) {
+      const z = -halfSize + iz * step;
+      for (let ix = 0; ix <= segments; ix++) {
+        const x = -halfSize + ix * step;
+        const base = vertexIndex * 3;
+        positions[base] = x;
+        positions[base + 1] = 0;
+        positions[base + 2] = z;
+        vertexIndex += 1;
+      }
+    }
+
+    for (let iz = 0; iz < segments; iz++) {
+      for (let ix = 0; ix < segments; ix++) {
+        const cellCenterX = -halfSize + (ix + 0.5) * step;
+        const cellCenterZ = -halfSize + (iz + 0.5) * step;
+        const insideInnerHole = innerSize > 0
+          && Math.abs(cellCenterX) < innerHalf
+          && Math.abs(cellCenterZ) < innerHalf;
+
+        if (insideInnerHole) continue;
+
+        const a = iz * (segments + 1) + ix;
+        const b = a + 1;
+        const c = a + segments + 1;
+        const d = c + 1;
+        indices.push(a, c, b);
+        indices.push(b, c, d);
+      }
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('waveAmp', new THREE.BufferAttribute(waveAmp, 1));
+    geometry.setAttribute('waveMotion', new THREE.BufferAttribute(waveMotion, 1));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+
+    return geometry;
+  }
+
+  disposeWaterMeshes() {
+    if (!this.waterLods || this.waterLods.length === 0) return;
+
+    for (const lod of this.waterLods) {
+      if (!lod.mesh) continue;
+      this.scene.remove(lod.mesh);
+      if (lod.mesh.geometry) {
+        lod.mesh.geometry.dispose();
+      }
+    }
+
+    this.waterLods = [];
+    this.waterMesh = null;
+  }
+
+  rebuildWaterMeshes(force = false) {
+    const lodConfigs = this.getWaterLodConfigs();
+    const signature = lodConfigs
+      .map((config) => [
+        config.key,
+        config.size,
+        config.innerSize,
+        config.segments,
+        config.snap,
+        config.waveVisualScale,
+        config.waveMotionScale,
+      ].join(':'))
+      .join('|');
+
+    if (!force && signature === this.waterLodSignature) return;
+
+    this.waterLodSignature = signature;
+    this.disposeWaterMeshes();
+
+    this.waterLods = lodConfigs.map((config) => {
+      const geometry = this.createWaterRingGeometry(config.size, config.segments, config.innerSize);
+      const mesh = new THREE.Mesh(geometry, this.waterMaterial);
+      mesh.position.y = this.waterLevel;
+      mesh.frustumCulled = false;
+      mesh.renderOrder = config.renderOrder;
+      this.scene.add(mesh);
+
+      return {
+        ...config,
+        mesh,
+        snappedX: null,
+        snappedZ: null,
+      };
+    });
+
+    this.waterMesh = this.waterLods[0] ? this.waterLods[0].mesh : null;
+    this.updateWaterPatch(true);
+  }
+
   updateWaterPatch(force = false) {
-    if (!this.waterMesh) return;
+    if (!this.waterLods || this.waterLods.length === 0) return;
 
     const centerX = this.position ? this.position.x : 0;
     const centerZ = this.position ? this.position.z : 0;
-    const snappedX = Math.floor(centerX / this.waterPatchSnap) * this.waterPatchSnap;
-    const snappedZ = Math.floor(centerZ / this.waterPatchSnap) * this.waterPatchSnap;
 
-    if (!force && snappedX === this.waterPatchX && snappedZ === this.waterPatchZ) return;
+    for (const lod of this.waterLods) {
+      const snappedX = Math.floor(centerX / lod.snap) * lod.snap;
+      const snappedZ = Math.floor(centerZ / lod.snap) * lod.snap;
 
-    this.waterPatchX = snappedX;
-    this.waterPatchZ = snappedZ;
-    this.waterMesh.position.set(snappedX, this.waterLevel, snappedZ);
+      if (!force && snappedX === lod.snappedX && snappedZ === lod.snappedZ) {
+        continue;
+      }
 
-    const positions = this.waterMesh.geometry.attributes.position.array;
-    const waveAmp = this.waterMesh.geometry.attributes.waveAmp;
-    const ampArray = waveAmp.array;
+      lod.snappedX = snappedX;
+      lod.snappedZ = snappedZ;
+      lod.mesh.position.set(snappedX, this.waterLevel, snappedZ);
 
-    for (let i = 0, j = 0; i < ampArray.length; i++, j += 3) {
-      const worldX = snappedX + positions[j];
-      const worldZ = snappedZ + positions[j + 2];
-      ampArray[i] = this.getWaterWaveAmplitude(worldX, worldZ);
+      const geometry = lod.mesh.geometry;
+      const positions = geometry.attributes.position.array;
+      const waveAmp = geometry.attributes.waveAmp;
+      const waveMotion = geometry.attributes.waveMotion;
+      const ampArray = waveAmp.array;
+      const motionArray = waveMotion.array;
+
+      for (let i = 0, j = 0; i < ampArray.length; i++, j += 3) {
+        const worldX = snappedX + positions[j];
+        const worldZ = snappedZ + positions[j + 2];
+        const baseAmp = this.getWaterWaveAmplitude(worldX, worldZ);
+        ampArray[i] = baseAmp * lod.waveVisualScale;
+        motionArray[i] = baseAmp * lod.waveMotionScale;
+      }
+
+      waveAmp.needsUpdate = true;
+      waveMotion.needsUpdate = true;
     }
-
-    waveAmp.needsUpdate = true;
   }
 
   createPlayerModel(color = 0x2299ff) {
@@ -1115,30 +1370,59 @@ class Game {
     return div;
   }
 
-  start(username, token) {
+  async emitStartupProgress(onProgress, message, progress) {
+    if (typeof onProgress !== 'function') return;
+    const result = onProgress(message, progress);
+    if (result && typeof result.then === 'function') {
+      await result;
+    }
+  }
+
+  async start(username, token, userId, onProgress = null) {
     this.username = username;
+    this.userId = userId ?? null;
     Game.preloadCharacterAsset().catch(() => {});
+
+    await this.emitStartupProgress(onProgress, 'Attaching controls…', 56);
 
     // Setup input
     this.setupInput();
 
+    await this.emitStartupProgress(onProgress, 'Connecting to server…', 68);
+
     // Connect to multiplayer
-    this.connectMultiplayer(token);
+    const spawnPromise = this.connectMultiplayer(token);
 
-    // Initial terrain
-    this.terrain.update(this.position.x, this.position.z);
+    await this.emitStartupProgress(onProgress, 'Receiving spawn position…', 76);
+    const spawnData = await spawnPromise;
 
-    // Place player on terrain
-    const groundY = this.terrain.getHeight(this.position.x, this.position.z);
-    this.position.y = groundY + this.playerHeight;
+    await this.emitStartupProgress(onProgress, 'Positioning player…', 84);
+    this.applySpawnPosition(spawnData, { warmTerrain: false });
+
+    await this.emitStartupProgress(onProgress, 'Generating nearby terrain…', 92);
+
+    // Initial terrain around the actual spawn position
+    this.terrain.update(this.position.x, this.position.z, this.camera, { forceLoad: true });
+
+    if (!Number.isFinite(spawnData?.y)) {
+      const groundY = this.terrain.getHeight(this.position.x, this.position.z);
+      this.position.y = groundY + this.playerHeight;
+      this.updateCamera();
+    }
 
     // Start game loop
     this.running = true;
+    this.clock.start();
+    this.clock.getDelta();
     this.animate();
+
+    await this.emitStartupProgress(onProgress, 'Synchronizing world…', 98);
   }
 
   stop() {
     this.running = false;
+    this.isFlying = false;
+    this.setDebugMenuOpen(false);
     this.setPhoneOpen(false, { skipPointerLock: true, immediate: true });
     if (this.socket) {
       this.socket.disconnect();
@@ -1162,10 +1446,423 @@ class Game {
     document.exitPointerLock();
   }
 
+  setFlying(enabled) {
+    const nextState = !!enabled;
+    if (this.isFlying === nextState) return;
+
+    this.isFlying = nextState;
+    this.isRunning = false;
+    this.isCrouching = false;
+    this.velocity.y = 0;
+
+    if (nextState) {
+      this.isSwimming = false;
+      this.jumpAnimationTimer = 0;
+    }
+  }
+
+  normalizeDayTime(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return 0;
+    const wrapped = numericValue % 1;
+    return wrapped < 0 ? wrapped + 1 : wrapped;
+  }
+
+  normalizeDebugCycleSpeed(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return 1;
+    return Math.max(0, Math.min(20, numericValue));
+  }
+
+  getCurrentDebugCycleSpeed() {
+    return this.debugTimeOverride.active
+      ? this.debugTimeOverride.speedMultiplier
+      : 1;
+  }
+
+  getCurrentDayTime(now = Date.now()) {
+    if (this.debugTimeOverride.active) {
+      const speedMultiplier = this.normalizeDebugCycleSpeed(this.debugTimeOverride.speedMultiplier);
+      if (speedMultiplier <= 0) {
+        return this.normalizeDayTime(this.debugTimeOverride.anchorDayTime);
+      }
+
+      const elapsedMs = now - this.debugTimeOverride.anchorRealTime;
+      const delta = (elapsedMs / this.timeCycleMs) * speedMultiplier;
+      return this.normalizeDayTime(this.debugTimeOverride.anchorDayTime + delta);
+    }
+
+    if (this.gameWorldStartTime !== null) {
+      const elapsedMs = now - this.gameWorldStartTime;
+      return this.normalizeDayTime(elapsedMs / this.timeCycleMs);
+    }
+
+    return this.normalizeDayTime(this.dayTime);
+  }
+
+  formatDayTimeLabel(dayTime) {
+    const normalized = this.normalizeDayTime(dayTime);
+    const totalMinutes = Math.floor(normalized * 24 * 60) % 1440;
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  }
+
+  formatDayCycleSpeedLabel(speedMultiplier) {
+    const speed = this.normalizeDebugCycleSpeed(speedMultiplier);
+    if (speed <= 0) return 'Paused';
+
+    const cycleMinutes = this.defaultTimeCycleMs / 60000 / speed;
+    const speedText = speed < 10 ? speed.toFixed(1) : speed.toFixed(0);
+    const cycleText = cycleMinutes >= 10 ? cycleMinutes.toFixed(1) : cycleMinutes.toFixed(2);
+    return `${speedText}× · ${cycleText} min/day`;
+  }
+
+  syncDebugMenuUI(forceSliderSync = false) {
+    const ui = this.debugMenu;
+    if (!ui || !ui.root) return;
+
+    const dayTime = this.getCurrentDayTime();
+    const speedMultiplier = this.getCurrentDebugCycleSpeed();
+
+    if (ui.sourceLabel) {
+      ui.sourceLabel.textContent = this.debugTimeOverride.active
+        ? 'Local override active'
+        : 'Following server time';
+    }
+
+    if (ui.timeValue) {
+      ui.timeValue.textContent = this.formatDayTimeLabel(dayTime);
+    }
+
+    if (ui.timeSlider && (forceSliderSync || !ui.timeScrubbing)) {
+      ui.timeSlider.value = String(Math.floor(dayTime * 1440) % 1440);
+    }
+
+    if (ui.speedValue) {
+      ui.speedValue.textContent = this.formatDayCycleSpeedLabel(speedMultiplier);
+    }
+
+    if (ui.speedSlider && (forceSliderSync || !ui.speedScrubbing)) {
+      ui.speedSlider.value = speedMultiplier.toFixed(1);
+    }
+  }
+
+  refreshDebugLodControls() {
+    const ui = this.debugMenu;
+    if (!ui || !ui.lodContainer) return;
+
+    const lodSettings = this.terrain.getTerrainLodSettings();
+    if (!Array.isArray(ui.lodControls) || ui.lodControls.length !== lodSettings.length) {
+      this.buildDebugLodControls();
+      return;
+    }
+
+    lodSettings.forEach((setting, index) => {
+      const control = ui.lodControls[index];
+      if (!control) return;
+
+      if (control.distanceInput && Number.isFinite(setting.maxDistance)) {
+        control.distanceInput.value = String(setting.maxDistance);
+      }
+
+      if (control.trianglesInput) {
+        control.trianglesInput.value = String(setting.trianglesTarget);
+      }
+
+      if (control.note) {
+        const rangeText = Number.isFinite(setting.maxDistance)
+          ? `Active until ${setting.maxDistance} m.`
+          : 'Fallback level beyond the previous distance.';
+        control.note.textContent = `${rangeText} Rendered: ${setting.renderedTriangles.toLocaleString()} tris (${setting.actualTriangles.toLocaleString()} terrain + ${setting.skirtTriangles.toLocaleString()} skirts) · ${setting.gridSize}×${setting.gridSize} vertices.`;
+      }
+    });
+  }
+
+  applyDebugTerrainLodSetting(levelIndex, field, value) {
+    const currentSettings = this.terrain.getTerrainLodSettings().map((setting) => ({
+      distance: setting.maxDistance,
+      triangles: setting.trianglesTarget,
+    }));
+
+    if (!currentSettings[levelIndex]) return;
+
+    if (field === 'distance' && levelIndex < currentSettings.length - 1) {
+      currentSettings[levelIndex].distance = value;
+    }
+
+    if (field === 'triangles') {
+      currentSettings[levelIndex].triangles = value;
+    }
+
+    const changed = this.terrain.setTerrainLodSettings(currentSettings);
+    this.refreshDebugLodControls();
+
+    if (changed && this.running) {
+      this.terrain.update(this.position.x, this.position.z, this.camera);
+    }
+  }
+
+  buildDebugLodControls() {
+    const ui = this.debugMenu;
+    if (!ui || !ui.lodContainer) return;
+
+    const lodSettings = this.terrain.getTerrainLodSettings();
+    ui.lodContainer.innerHTML = '';
+    ui.lodControls = [];
+
+    lodSettings.forEach((setting, index) => {
+      const card = document.createElement('div');
+      card.className = 'debug-lod-card';
+
+      const title = document.createElement('div');
+      title.className = 'debug-lod-title';
+      title.textContent = `LOD ${index}`;
+      card.appendChild(title);
+
+      let distanceInput = null;
+      if (index < lodSettings.length - 1) {
+        const distanceRow = document.createElement('div');
+        distanceRow.className = 'debug-input-row';
+
+        const distanceLabel = document.createElement('label');
+        distanceLabel.textContent = 'Max Distance';
+        distanceRow.appendChild(distanceLabel);
+
+        distanceInput = document.createElement('input');
+        distanceInput.type = 'number';
+        distanceInput.className = 'debug-number-input';
+        distanceInput.min = String(Math.round(this.terrain.chunkWorldSize * 0.5));
+        distanceInput.max = String(this.terrain.maxViewDistance * this.terrain.chunkWorldSize * 4);
+        distanceInput.step = '16';
+        distanceInput.value = String(setting.maxDistance);
+        distanceInput.addEventListener('change', () => {
+          this.applyDebugTerrainLodSetting(index, 'distance', distanceInput.value);
+        });
+        distanceRow.appendChild(distanceInput);
+        card.appendChild(distanceRow);
+      } else {
+        const staticRow = document.createElement('div');
+        staticRow.className = 'debug-input-row';
+
+        const staticLabel = document.createElement('div');
+        staticLabel.className = 'debug-static-label';
+        staticLabel.textContent = 'Distance';
+        staticRow.appendChild(staticLabel);
+
+        const staticValue = document.createElement('div');
+        staticValue.className = 'debug-static-value';
+        staticValue.textContent = 'Beyond previous';
+        staticRow.appendChild(staticValue);
+        card.appendChild(staticRow);
+      }
+
+      const trianglesRow = document.createElement('div');
+      trianglesRow.className = 'debug-input-row';
+
+      const trianglesLabel = document.createElement('label');
+      trianglesLabel.textContent = 'Triangle Target';
+      trianglesRow.appendChild(trianglesLabel);
+
+      const trianglesInput = document.createElement('input');
+      trianglesInput.type = 'number';
+      trianglesInput.className = 'debug-number-input';
+      trianglesInput.min = '32';
+      trianglesInput.max = String(this.terrain.maxChunkTriangles);
+      trianglesInput.step = '32';
+      trianglesInput.value = String(setting.trianglesTarget);
+      trianglesInput.addEventListener('change', () => {
+        this.applyDebugTerrainLodSetting(index, 'triangles', trianglesInput.value);
+      });
+      trianglesRow.appendChild(trianglesInput);
+      card.appendChild(trianglesRow);
+
+      const note = document.createElement('div');
+      note.className = 'debug-lod-note';
+      card.appendChild(note);
+
+      ui.lodContainer.appendChild(card);
+      ui.lodControls.push({ card, distanceInput, trianglesInput, note });
+    });
+
+    this.refreshDebugLodControls();
+  }
+
+  applyDebugTimeOfDay(dayTime) {
+    const nextDayTime = this.normalizeDayTime(dayTime);
+    const speedMultiplier = this.getCurrentDebugCycleSpeed();
+
+    this.debugTimeOverride.active = true;
+    this.debugTimeOverride.anchorDayTime = nextDayTime;
+    this.debugTimeOverride.anchorRealTime = Date.now();
+    this.debugTimeOverride.speedMultiplier = speedMultiplier;
+    this.dayTime = nextDayTime;
+
+    this.syncDebugMenuUI(true);
+  }
+
+  applyDebugCycleSpeed(speedMultiplier) {
+    const nextSpeed = this.normalizeDebugCycleSpeed(speedMultiplier);
+    const currentDayTime = this.getCurrentDayTime();
+
+    this.debugTimeOverride.active = true;
+    this.debugTimeOverride.anchorDayTime = currentDayTime;
+    this.debugTimeOverride.anchorRealTime = Date.now();
+    this.debugTimeOverride.speedMultiplier = nextSpeed;
+    this.dayTime = currentDayTime;
+
+    this.syncDebugMenuUI(true);
+  }
+
+  resetDebugTimeOverride() {
+    if (Number.isFinite(this.lastServerTimeSample)) {
+      this.gameWorldStartTime = Date.now() - this.lastServerTimeSample * this.timeCycleMs;
+    }
+
+    this.debugTimeOverride.active = false;
+    this.debugTimeOverride.anchorDayTime = this.getCurrentDayTime();
+    this.debugTimeOverride.anchorRealTime = Date.now();
+    this.debugTimeOverride.speedMultiplier = 1;
+    this.dayTime = this.getCurrentDayTime();
+
+    this.syncDebugMenuUI(true);
+  }
+
+  setDebugMenuOpen(open) {
+    const ui = this.debugMenu;
+    if (!ui || !ui.root) return;
+
+    const nextState = !!open;
+    if (this.debugMenuOpen === nextState) return;
+
+    this.debugMenuOpen = nextState;
+    ui.root.classList.toggle('open', nextState);
+    ui.root.setAttribute('aria-hidden', nextState ? 'false' : 'true');
+
+    const prompt = document.getElementById('lock-prompt');
+
+    if (nextState) {
+      if (this.phoneOpen || this.phoneDocked) {
+        this.setPhoneOpen(false, { skipPointerLock: true, immediate: true });
+      }
+
+      this.keys = {};
+      this.lastJumpTapTime = -Infinity;
+      this.isRunning = false;
+      this.isCrouching = false;
+      this.refreshDebugLodControls();
+      this.syncDebugMenuUI(true);
+
+      if (prompt) {
+        prompt.style.display = 'none';
+      }
+
+      if (document.pointerLockElement === this.canvas) {
+        document.exitPointerLock();
+      }
+
+      return;
+    }
+
+    if (prompt && !this.paused) {
+      prompt.style.display = 'block';
+    }
+
+    if (!this.paused && this.running) {
+      this.canvas.requestPointerLock();
+    }
+  }
+
+  setupDebugMenu() {
+    const root = document.getElementById('debug-menu');
+    if (!root) return;
+
+    this.debugMenu = {
+      root,
+      sourceLabel: document.getElementById('debug-time-source'),
+      timeSlider: document.getElementById('debug-time-slider'),
+      timeValue: document.getElementById('debug-time-value'),
+      speedSlider: document.getElementById('debug-speed-slider'),
+      speedValue: document.getElementById('debug-speed-value'),
+      lodContainer: document.getElementById('debug-lod-controls'),
+      lodControls: [],
+      closeBtn: document.getElementById('debug-menu-close'),
+      resetBtn: document.getElementById('debug-time-reset'),
+      timeScrubbing: false,
+      speedScrubbing: false,
+    };
+
+    const ui = this.debugMenu;
+
+    if (ui.closeBtn) {
+      ui.closeBtn.onclick = () => this.setDebugMenuOpen(false);
+    }
+
+    if (ui.resetBtn) {
+      ui.resetBtn.onclick = () => this.resetDebugTimeOverride();
+    }
+
+    if (ui.timeSlider) {
+      const stopTimeScrub = () => {
+        ui.timeScrubbing = false;
+        this.syncDebugMenuUI();
+      };
+
+      ui.timeSlider.onpointerdown = () => {
+        ui.timeScrubbing = true;
+      };
+      ui.timeSlider.onpointerup = stopTimeScrub;
+      ui.timeSlider.onpointercancel = stopTimeScrub;
+      ui.timeSlider.onblur = stopTimeScrub;
+      ui.timeSlider.onchange = stopTimeScrub;
+      ui.timeSlider.oninput = () => {
+        const minutes = Number(ui.timeSlider.value) || 0;
+        this.applyDebugTimeOfDay(minutes / 1440);
+      };
+    }
+
+    if (ui.speedSlider) {
+      const stopSpeedScrub = () => {
+        ui.speedScrubbing = false;
+        this.syncDebugMenuUI();
+      };
+
+      ui.speedSlider.onpointerdown = () => {
+        ui.speedScrubbing = true;
+      };
+      ui.speedSlider.onpointerup = stopSpeedScrub;
+      ui.speedSlider.onpointercancel = stopSpeedScrub;
+      ui.speedSlider.onblur = stopSpeedScrub;
+      ui.speedSlider.onchange = stopSpeedScrub;
+      ui.speedSlider.oninput = () => {
+        this.applyDebugCycleSpeed(ui.speedSlider.value);
+      };
+    }
+
+    this.buildDebugLodControls();
+    this.syncDebugMenuUI(true);
+  }
+
   setupInput() {
     this._onKeyDown = (e) => {
       const kb = this.settings.keybinds;
       const phoneKey = kb.phone;
+
+      if (e.code === 'Enter' && !e.repeat) {
+        e.preventDefault();
+        if (!this.paused || this.debugMenuOpen) {
+          this.setDebugMenuOpen(!this.debugMenuOpen);
+        }
+        return;
+      }
+
+      if (this.debugMenuOpen) {
+        if (e.code === 'Escape') {
+          e.preventDefault();
+          this.setDebugMenuOpen(false);
+        }
+        return;
+      }
 
       // Escape toggles pause (only works when NOT pointer-locked; browser
       // intercepts Escape to kill pointer lock before keydown fires, so the
@@ -1199,10 +1896,21 @@ class Game {
       if (this.phoneOpen) return;
 
       this.keys[e.code] = true;
-      if (e.code === kb.jump && this.onGround && !this.isSwimming) {
-        this.velocity.y = this.jumpSpeed;
-        this.onGround = false;
-        this.jumpAnimationTimer = this.jumpAnimationDuration;
+      if (e.code === kb.jump && !e.repeat) {
+        const now = performance.now();
+        const tappedTwiceQuickly = now - this.lastJumpTapTime <= this.flightToggleWindowMs;
+        this.lastJumpTapTime = now;
+
+        if (!this.isFlying && tappedTwiceQuickly && !this.isSwimming) {
+          this.setFlying(true);
+          return;
+        }
+
+        if (!this.isFlying && this.onGround && !this.isSwimming) {
+          this.velocity.y = this.jumpSpeed;
+          this.onGround = false;
+          this.jumpAnimationTimer = this.jumpAnimationDuration;
+        }
       }
     };
     this._onKeyUp = (e) => {
@@ -1212,7 +1920,7 @@ class Game {
       if (e.code === kb.crouch) this.isCrouching = false;
     };
     this._onMouseMove = (e) => {
-      if (!this.mouseLocked || this.paused) return;
+      if (!this.mouseLocked || this.paused || this.debugMenuOpen) return;
       this.euler.y -= e.movementX * this.mouseSensitivity;
       this.euler.x -= e.movementY * this.mouseSensitivity;
       this.euler.x = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, this.euler.x));
@@ -1224,7 +1932,7 @@ class Game {
 
     // Click canvas to (re)acquire pointer lock when not paused
     this._onCanvasClick = () => {
-      if (!this.paused && !this.phoneOpen) this.canvas.requestPointerLock();
+      if (!this.paused && !this.phoneOpen && !this.debugMenuOpen) this.canvas.requestPointerLock();
     };
     this.canvas.addEventListener('click', this._onCanvasClick);
 
@@ -1237,6 +1945,10 @@ class Game {
         // Lock acquired — hide the "click to play" prompt
         prompt.style.display = 'none';
       } else if (!this.paused && this.running) {
+        if (this.debugMenuOpen) {
+          prompt.style.display = 'none';
+          return;
+        }
         if (this.phoneOpen) return;
         if (this.phoneDocked) {
           this.setPhoneOpen(false, { skipPointerLock: true, immediate: true });
@@ -1254,6 +1966,10 @@ class Game {
   }
 
   togglePause() {
+    if (this.debugMenuOpen) {
+      this.setDebugMenuOpen(false);
+    }
+
     if (this.phoneOpen || this.phoneDocked) {
       this.setPhoneOpen(false, { skipPointerLock: true, immediate: true });
     }
@@ -1271,6 +1987,7 @@ class Game {
       prompt.style.display = 'none';
       // Clear held keys so nothing keeps moving
       this.keys = {};
+      this.lastJumpTapTime = -Infinity;
       this.isRunning = false;
       this.isCrouching = false;
     } else {
@@ -1285,15 +2002,30 @@ class Game {
 
   // Apply settings live (called from settings UI)
   applySettings(settings) {
-    this.settings = settings;
-    this.mouseSensitivity = settings.sensitivity;
-    Game.saveSettings(settings);
+    const normalizedSettings = Game.normalizeSettings(settings);
+    this.settings = normalizedSettings;
+    this.mouseSensitivity = normalizedSettings.sensitivity;
+    this.terrain.setViewDistance(normalizedSettings.renderDistance);
+    this.terrain.setGrassBladesEnabled(normalizedSettings.renderGrassBlades);
+    this.syncDistanceRendering(true);
+    this.terrain.update(this.position.x, this.position.z, this.camera);
+    Game.saveSettings(normalizedSettings);
     this.updatePhoneKeyHint();
+  }
+
+  static get MIN_RENDER_DISTANCE() {
+    return 2;
+  }
+
+  static get MAX_RENDER_DISTANCE() {
+    return 50;
   }
 
   static defaultSettings() {
     return {
       sensitivity: 0.001,
+      renderDistance: 3,
+      renderGrassBlades: true,
       keybinds: {
         forward:  'KeyW',
         backward: 'KeyS',
@@ -1307,24 +2039,48 @@ class Game {
     };
   }
 
+  static normalizeRenderDistance(value) {
+    const fallback = Game.defaultSettings().renderDistance;
+    const parsedValue = Math.round(Number(value));
+    if (!Number.isFinite(parsedValue)) return fallback;
+
+    return Math.max(
+      Game.MIN_RENDER_DISTANCE,
+      Math.min(Game.MAX_RENDER_DISTANCE, parsedValue)
+    );
+  }
+
+  static normalizeSettings(settings = {}) {
+    const def = Game.defaultSettings();
+    const sourceSettings = settings && typeof settings === 'object' ? settings : {};
+    const sensitivity = Number(sourceSettings.sensitivity);
+
+    return {
+      sensitivity: Number.isFinite(sensitivity) ? sensitivity : def.sensitivity,
+      renderDistance: Game.normalizeRenderDistance(sourceSettings.renderDistance),
+      renderGrassBlades: typeof sourceSettings.renderGrassBlades === 'boolean'
+        ? sourceSettings.renderGrassBlades
+        : def.renderGrassBlades,
+      keybinds: Object.assign(
+        {},
+        def.keybinds,
+        sourceSettings.keybinds && typeof sourceSettings.keybinds === 'object' ? sourceSettings.keybinds : {}
+      ),
+    };
+  }
+
   static loadSettings() {
     try {
       const raw = localStorage.getItem('usim_settings');
       if (raw) {
-        const saved = JSON.parse(raw);
-        const def = Game.defaultSettings();
-        // Merge so new defaults appear if not present
-        return {
-          sensitivity: saved.sensitivity ?? def.sensitivity,
-          keybinds: Object.assign({}, def.keybinds, saved.keybinds),
-        };
+        return Game.normalizeSettings(JSON.parse(raw));
       }
     } catch (e) {}
     return Game.defaultSettings();
   }
 
   static saveSettings(settings) {
-    localStorage.setItem('usim_settings', JSON.stringify(settings));
+    localStorage.setItem('usim_settings', JSON.stringify(Game.normalizeSettings(settings)));
   }
 
   setupPhoneUI() {
@@ -1411,7 +2167,6 @@ class Game {
       this.phoneUI.appBody.innerHTML = this.getPhoneMapMarkup();
       this.setupPhoneMapApp();
       this.markPhoneMapDirty();
-      this.renderPhoneMap(true);
       return;
     }
 
@@ -1509,7 +2264,6 @@ class Game {
       map.centerX = map.dragCenterX - dx;
       map.centerZ = map.dragCenterZ - dz;
       this.markPhoneMapDirty();
-      this.renderPhoneMap(true);
     };
 
     const endDrag = (event) => {
@@ -1537,7 +2291,6 @@ class Game {
         map.centerZ = this.position.z;
         this.updatePhoneMapMeta();
         this.markPhoneMapDirty();
-        this.renderPhoneMap(true);
       };
     }
 
@@ -1576,7 +2329,6 @@ class Game {
     map.zoomIndex = nextIndex;
     this.updatePhoneMapMeta();
     this.markPhoneMapDirty();
-    this.renderPhoneMap(true);
   }
 
   markPhoneMapDirty() {
@@ -1598,9 +2350,56 @@ class Game {
       map.canvas.width = width;
       map.canvas.height = height;
       map.dirty = true;
+      map.backgroundKey = '';
     }
 
     return true;
+  }
+
+  getPhoneMapBackgroundCanvas(width, height) {
+    const map = this.phoneMap;
+    if (!map.backgroundCanvas) {
+      map.backgroundCanvas = document.createElement('canvas');
+      map.backgroundCtx = map.backgroundCanvas.getContext('2d', { alpha: false });
+    }
+
+    if (map.backgroundCanvas.width !== width || map.backgroundCanvas.height !== height) {
+      map.backgroundCanvas.width = width;
+      map.backgroundCanvas.height = height;
+    }
+
+    return {
+      canvas: map.backgroundCanvas,
+      ctx: map.backgroundCtx,
+    };
+  }
+
+  getPhoneMapBackgroundState(width, height, centerX, centerZ, halfSpan) {
+    const raster = this.getPhoneMapTerrainRaster(width, height, halfSpan);
+    const span = halfSpan * 2;
+    const stepX = span / Math.max(1, raster.width - 1);
+    const stepZ = span / Math.max(1, raster.height - 1);
+    const snappedGridX = stepX > 0 ? Math.round(centerX / stepX) : 0;
+    const snappedGridZ = stepZ > 0 ? Math.round(centerZ / stepZ) : 0;
+
+    return {
+      centerX: snappedGridX * stepX,
+      centerZ: snappedGridZ * stepZ,
+      key: `${width}x${height}:${this.phoneMap.zoomIndex}:${snappedGridX}:${snappedGridZ}`,
+    };
+  }
+
+  drawPhoneMapBackground(ctx, width, height, centerX, centerZ, halfSpan) {
+    ctx.clearRect(0, 0, width, height);
+
+    const bg = ctx.createLinearGradient(0, 0, 0, height);
+    bg.addColorStop(0, '#edf4e8');
+    bg.addColorStop(1, '#d8e5d1');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, width, height);
+
+    this.drawPhoneMapTerrainLayer(ctx, width, height, centerX, centerZ, halfSpan);
+    this.drawPhoneMapRoads(ctx, width, height, centerX, centerZ, halfSpan);
   }
 
   renderPhoneMap(force = false) {
@@ -1614,41 +2413,37 @@ class Game {
     const headingChanged = Math.abs(this.euler.y - map.lastRenderHeading) > 0.03;
 
     if (map.followPlayer) {
-      const centerShift = Math.hypot(this.position.x - map.centerX, this.position.z - map.centerZ);
       map.centerX = this.position.x;
       map.centerZ = this.position.z;
-      if (centerShift > 0.25) map.dirty = true;
-    }
-
-    if (!force && !map.dirty && now - map.lastRenderTime < 90 && playerMoved < zoom.halfSpan * 0.01 && !headingChanged) {
-      return;
     }
 
     const ctx = map.ctx;
     const width = map.canvas.width;
     const height = map.canvas.height;
-    const centerX = map.centerX;
-    const centerZ = map.centerZ;
     const halfSpan = zoom.halfSpan;
+    const backgroundState = this.getPhoneMapBackgroundState(width, height, map.centerX, map.centerZ, halfSpan);
+    const needsBackgroundRender = force || map.dirty || map.backgroundKey !== backgroundState.key;
+    const worldPerPixel = (halfSpan * 2) / Math.max(1, width);
+    const trackerMotionThreshold = Math.max(0.15, worldPerPixel * 0.35);
+
+    if (!force && !needsBackgroundRender && now - map.lastRenderTime < 33 && playerMoved < trackerMotionThreshold && !headingChanged) {
+      return;
+    }
+
+    const background = this.getPhoneMapBackgroundCanvas(width, height);
+    if (needsBackgroundRender && background.ctx) {
+      this.drawPhoneMapBackground(background.ctx, width, height, backgroundState.centerX, backgroundState.centerZ, halfSpan);
+      map.backgroundKey = backgroundState.key;
+      map.backgroundCenterX = backgroundState.centerX;
+      map.backgroundCenterZ = backgroundState.centerZ;
+      map.dirty = false;
+    }
 
     ctx.clearRect(0, 0, width, height);
-
-    const bg = ctx.createLinearGradient(0, 0, 0, height);
-    bg.addColorStop(0, '#edf4e8');
-    bg.addColorStop(1, '#d8e5d1');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, width, height);
-
-    this.drawPhoneMapTerrainLayer(
-      ctx,
-      width,
-      height,
-      centerX,
-      centerZ,
-      halfSpan
-    );
-    this.drawPhoneMapRoads(ctx, width, height, centerX, centerZ, halfSpan);
-    this.drawPhoneMapTracker(ctx, width, height, centerX, centerZ, halfSpan);
+    if (background.canvas) {
+      ctx.drawImage(background.canvas, 0, 0, width, height);
+    }
+    this.drawPhoneMapTracker(ctx, width, height, map.backgroundCenterX, map.backgroundCenterZ, halfSpan);
 
     ctx.strokeStyle = 'rgba(255,255,255,0.12)';
     ctx.lineWidth = Math.max(1, Math.round(width / 220));
@@ -1663,14 +2458,13 @@ class Game {
     map.lastRenderPlayerX = this.position.x;
     map.lastRenderPlayerZ = this.position.z;
     map.lastRenderHeading = this.euler.y;
-    map.dirty = false;
   }
 
   drawPhoneMapTerrainLayer(ctx, width, height, centerX, centerZ, halfSpan) {
-    const raster = this.getPhoneMapTerrainRaster(width, height);
-    const imageData = raster.ctx.createImageData(raster.width, raster.height);
+    const raster = this.getPhoneMapTerrainRaster(width, height, halfSpan);
+    const imageData = raster.imageData;
     const pixels = imageData.data;
-    const heights = new Float32Array(raster.width * raster.height);
+    const heights = raster.heights;
     const span = halfSpan * 2;
     const minX = centerX - halfSpan;
     const minZ = centerZ - halfSpan;
@@ -1691,12 +2485,10 @@ class Game {
     }
 
     for (let y = 0; y < raster.height; y++) {
-      const worldZ = minZ + y * stepZ;
       const upY = Math.max(0, y - 1);
       const downY = Math.min(raster.height - 1, y + 1);
 
       for (let x = 0; x < raster.width; x++) {
-        const worldX = minX + x * stepX;
         const index = y * raster.width + x;
         const leftX = Math.max(0, x - 1);
         const rightX = Math.min(raster.width - 1, x + 1);
@@ -1707,16 +2499,11 @@ class Game {
         const downHeight = heights[downY * raster.width + x];
         const dx = -(rightHeight - leftHeight) / Math.max(stepX * (rightX - leftX || 1), 1e-4);
         const dz = -(downHeight - upHeight) / Math.max(stepZ * (downY - upY || 1), 1e-4);
-        const invLength = 1 / Math.max(1e-4, Math.hypot(dx, 1.15, dz));
-        const light = Math.max(0, (dx * lightX + 1.15 * lightY + dz * lightZ) * invLength);
+        const normalY = 1 / Math.max(1e-4, Math.hypot(dx, 1.15, dz));
+        const light = Math.max(0, (dx * lightX + 1.15 * lightY + dz * lightZ) * normalY);
         const shade = heightValue <= waterLevel ? 0.9 + light * 0.18 : 0.76 + light * 0.38;
-        const rgb = this.getPhoneMapNoiseColor(heightValue, worldX, worldZ, shade);
         const offset = index * 4;
-
-        pixels[offset] = rgb[0];
-        pixels[offset + 1] = rgb[1];
-        pixels[offset + 2] = rgb[2];
-        pixels[offset + 3] = 255;
+        this.writePhoneMapNoiseColor(pixels, offset, heightValue, 1 - normalY, shade);
       }
     }
 
@@ -1729,19 +2516,33 @@ class Game {
     ctx.restore();
   }
 
-  getPhoneMapTerrainRaster(width, height) {
+  getPhoneMapTerrainRaster(width, height, halfSpan) {
     const map = this.phoneMap;
     if (!map.terrainRasterCanvas) {
       map.terrainRasterCanvas = document.createElement('canvas');
       map.terrainRasterCtx = map.terrainRasterCanvas.getContext('2d', { alpha: false });
     }
 
-    const sampleWidth = Math.max(96, Math.min(192, Math.round(width * 0.34)));
-    const sampleHeight = Math.max(96, Math.min(192, Math.round(height * 0.34)));
+    const detailScale = halfSpan <= 1440
+      ? 0.42
+      : halfSpan <= 11520
+        ? 0.32
+        : halfSpan <= 92160
+          ? 0.24
+          : 0.18;
+    const minSample = halfSpan <= 1440 ? 96 : halfSpan <= 11520 ? 72 : 56;
+    const maxSample = halfSpan <= 1440 ? 160 : halfSpan <= 11520 ? 128 : 96;
+    const sampleWidth = Math.max(minSample, Math.min(maxSample, Math.round(width * detailScale)));
+    const sampleHeight = Math.max(minSample, Math.min(maxSample, Math.round(height * detailScale)));
 
     if (map.terrainRasterCanvas.width !== sampleWidth || map.terrainRasterCanvas.height !== sampleHeight) {
       map.terrainRasterCanvas.width = sampleWidth;
       map.terrainRasterCanvas.height = sampleHeight;
+      map.terrainRasterHeights = new Float32Array(sampleWidth * sampleHeight);
+      map.terrainRasterImageData = map.terrainRasterCtx.createImageData(sampleWidth, sampleHeight);
+    } else if (!map.terrainRasterHeights || map.terrainRasterHeights.length !== sampleWidth * sampleHeight) {
+      map.terrainRasterHeights = new Float32Array(sampleWidth * sampleHeight);
+      map.terrainRasterImageData = map.terrainRasterCtx.createImageData(sampleWidth, sampleHeight);
     }
 
     return {
@@ -1749,49 +2550,81 @@ class Game {
       ctx: map.terrainRasterCtx,
       width: sampleWidth,
       height: sampleHeight,
+      heights: map.terrainRasterHeights,
+      imageData: map.terrainRasterImageData,
     };
   }
 
-  getPhoneMapNoiseColor(height, worldX, worldZ, shade) {
+  writePhoneMapNoiseColor(pixels, offset, height, steepness, shade) {
     const waterLevel = this.waterLevel;
+    let r;
+    let g;
+    let b;
 
     if (height <= waterLevel) {
       const depth = Math.max(0, Math.min(1, (waterLevel - height) / 16));
-      return this.getPhoneMapShadedRgb([
-        72 - depth * 14,
-        142 + depth * 10,
-        214 + depth * 18,
-      ], shade);
-    }
-
-    if (height <= waterLevel + 5) {
+      r = 72 - depth * 14;
+      g = 142 + depth * 10;
+      b = 214 + depth * 18;
+    } else if (height <= waterLevel + 5) {
       const shoreBlend = Math.max(0, Math.min(1, (height - waterLevel) / 5));
-      return this.getPhoneMapShadedRgb([
-        214 - shoreBlend * 14,
-        203 - shoreBlend * 10,
-        164 - shoreBlend * 18,
-      ], 0.94 + shade * 0.06);
+      r = 214 - shoreBlend * 14;
+      g = 203 - shoreBlend * 10;
+      b = 164 - shoreBlend * 18;
+      shade = 0.94 + shade * 0.06;
+    } else {
+      const aboveSeaLevel = height - waterLevel;
+
+      if (aboveSeaLevel < 220) {
+        const t = Math.max(0, Math.min(1, (aboveSeaLevel - 5) / 215));
+        r = 88 - t * 18;
+        g = 142 - t * 20;
+        b = 74 - t * 18;
+      } else if (aboveSeaLevel < 500) {
+        const t = Math.max(0, Math.min(1, (aboveSeaLevel - 220) / 280));
+        r = 70 + t * 18;
+        g = 122 - t * 18;
+        b = 56 + t * 10;
+      } else if (aboveSeaLevel < 1100) {
+        const t = Math.max(0, Math.min(1, (aboveSeaLevel - 500) / 600));
+        r = 104 + t * 54;
+        g = 92 + t * 50;
+        b = 76 + t * 64;
+      } else {
+        const snowT = Math.max(0, Math.min(1, (aboveSeaLevel - 1100) / Math.max(1, this.terrain.heightScale - 1100)));
+        r = 158 + snowT * 84;
+        g = 146 + snowT * 92;
+        b = 140 + snowT * 102;
+      }
+
+      const rockiness = Math.max(0, Math.min(1, (steepness - 0.12) / 0.34))
+        * Math.max(0, Math.min(1, (aboveSeaLevel - 180) / 720));
+      if (rockiness > 0.001) {
+        const ridgeTint = Math.max(0, Math.min(1, (aboveSeaLevel - 500) / 800));
+        const rockR = 92 + ridgeTint * 46;
+        const rockG = 88 + ridgeTint * 42;
+        const rockB = 84 + ridgeTint * 50;
+        r += (rockR - r) * rockiness;
+        g += (rockG - g) * rockiness;
+        b += (rockB - b) * rockiness;
+      }
     }
 
-    const terrainColor = this.terrain.getTerrainColor(height, worldX, worldZ);
-    return this.getPhoneMapShadedRgb([
-      terrainColor[0] * 255,
-      terrainColor[1] * 255,
-      terrainColor[2] * 255,
-    ], shade);
-  }
-
-  getPhoneMapShadedRgb(rgb, shade) {
-    const clamp = (value) => Math.max(0, Math.min(255, Math.round(value * shade)));
-    return [clamp(rgb[0]), clamp(rgb[1]), clamp(rgb[2])];
+    pixels[offset] = Math.max(0, Math.min(255, Math.round(r * shade)));
+    pixels[offset + 1] = Math.max(0, Math.min(255, Math.round(g * shade)));
+    pixels[offset + 2] = Math.max(0, Math.min(255, Math.round(b * shade)));
+    pixels[offset + 3] = 255;
   }
 
   drawPhoneMapRoads(ctx, width, height, centerX, centerZ, halfSpan) {
+    if (halfSpan > 92160) return;
+
     const minX = centerX - halfSpan;
     const minZ = centerZ - halfSpan;
     const maxX = centerX + halfSpan;
     const maxZ = centerZ + halfSpan;
-    const curves = this.terrain.getHighwayCurvesInBounds(minX, minZ, maxX, maxZ, halfSpan * 0.15);
+    const curves = this.terrain.getCachedHighwayCurvesInBounds(minX, minZ, maxX, maxZ, halfSpan * 0.15);
+    if (!curves.length) return;
     const span = halfSpan * 2;
     const projectX = (worldX) => ((worldX - minX) / span) * width;
     const projectY = (worldZ) => ((worldZ - minZ) / span) * height;
@@ -1948,71 +2781,156 @@ class Game {
     this.syncPhoneUI(immediate);
   }
 
+  applySpawnPosition(data, options = {}) {
+    if (!data) return;
+
+    const warmTerrain = options.warmTerrain !== false;
+
+    const nextX = Number.isFinite(data.x) ? data.x : this.position.x;
+    const nextZ = Number.isFinite(data.z) ? data.z : this.position.z;
+    const nextY = Number.isFinite(data.y)
+      ? data.y
+      : (warmTerrain ? this.terrain.getHeight(nextX, nextZ) + this.playerHeight : this.position.y);
+
+    this.position.set(
+      nextX,
+      nextY,
+      nextZ
+    );
+
+    this.velocity.set(0, 0, 0);
+    this.euler.x = Number.isFinite(data.rx) ? data.rx : this.euler.x;
+    this.euler.y = Number.isFinite(data.ry) ? data.ry : this.euler.y;
+    this.jumpAnimationTimer = 0;
+    this.lastSendTime = 0;
+
+    this.updateCamera();
+
+    if (warmTerrain) {
+      this.terrain.update(this.position.x, this.position.z, this.camera, { forceLoad: true });
+    }
+
+    if (this.phoneMap) {
+      this.phoneMap.centerX = this.position.x;
+      this.phoneMap.centerZ = this.position.z;
+      this.phoneMap.lastRenderPlayerX = this.position.x;
+      this.phoneMap.lastRenderPlayerZ = this.position.z;
+      this.phoneMap.lastRenderHeading = this.euler.y;
+      this.phoneMap.dirty = true;
+    }
+  }
+
+  isOwnPlayer(socketId, data = null) {
+    if (this.socket && socketId === this.socket.id) {
+      return true;
+    }
+
+    const ownUserId = Number(this.userId);
+    const playerUserId = Number(data?.id);
+
+    return Number.isFinite(ownUserId)
+      && Number.isFinite(playerUserId)
+      && ownUserId === playerUserId;
+  }
+
   connectMultiplayer(token) {
-    this.socket = io({
-      auth: { token }
-    });
+    return new Promise((resolve, reject) => {
+      let initialSpawnResolved = false;
+      const rejectInitialSpawn = (error) => {
+        if (initialSpawnResolved) return;
+        initialSpawnResolved = true;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
+      const resolveInitialSpawn = (data) => {
+        if (initialSpawnResolved) return;
+        initialSpawnResolved = true;
+        resolve(data);
+      };
 
-    this.socket.on('connect', () => {
-      console.log('Connected to server');
-    });
+      this.socket = io({
+        auth: { token }
+      });
 
-    this.socket.on('gameWorldTime', (data) => {
-      this.gameWorldStartTime = data.worldStartTime;
-      console.log('Synchronized with server time');
-    });
+      this.socket.on('connect', () => {
+        console.log('Connected to server');
+      });
 
-    this.socket.on('gameTimeUpdate', (data) => {
-      // Periodic resync with server (optional, helps prevent drift)
-      // The client calculates time locally, but this confirms server thinking
-      const serverTime = data.currentTime;
-      const clientTime = (Date.now() - this.gameWorldStartTime) / this.timeCycleMs % 1.0;
-      // Only resync if drift is significant (more than 1 game hour = 1/24th of cycle)
-      const drift = Math.abs(serverTime - clientTime);
-      if (drift > 1/24 && drift < 0.5) { // Check drift is not wrapping around
-        console.warn('Time drift detected, minor adjustment made');
-        // Small adjustment to compensate for client/server clock differences
-        this.gameWorldStartTime = Date.now() - (serverTime * this.timeCycleMs);
-      }
-    });
+      this.socket.on('gameWorldTime', (data) => {
+        this.gameWorldStartTime = data.worldStartTime;
+        this.lastServerTimeSample = Number.isFinite(data.currentTime) ? data.currentTime : this.lastServerTimeSample;
+        console.log('Synchronized with server time');
+      });
 
-    this.socket.on('currentPlayers', (players) => {
-      for (const [socketId, data] of Object.entries(players)) {
-        if (socketId === this.socket.id) continue;
-        this.addOtherPlayer(socketId, data);
-      }
-      this.updatePlayerCount();
-    });
+      this.socket.on('gameTimeUpdate', (data) => {
+        // Periodic resync with server (optional, helps prevent drift)
+        // The client calculates time locally, but this confirms server thinking
+        const serverTime = data.currentTime;
+        this.lastServerTimeSample = Number.isFinite(serverTime) ? serverTime : this.lastServerTimeSample;
+        if (this.debugTimeOverride.active) {
+          return;
+        }
+        const clientTime = (Date.now() - this.gameWorldStartTime) / this.timeCycleMs % 1.0;
+        // Only resync if drift is significant (more than 1 game hour = 1/24th of cycle)
+        const drift = Math.abs(serverTime - clientTime);
+        if (drift > 1/24 && drift < 0.5) { // Check drift is not wrapping around
+          console.warn('Time drift detected, minor adjustment made');
+          // Small adjustment to compensate for client/server clock differences
+          this.gameWorldStartTime = Date.now() - (serverTime * this.timeCycleMs);
+        }
+      });
 
-    this.socket.on('playerJoined', (data) => {
-      this.addOtherPlayer(data.socketId, data);
-      this.updatePlayerCount();
-    });
+      this.socket.on('spawnPosition', (data) => {
+        if (!initialSpawnResolved) {
+          resolveInitialSpawn(data);
+          return;
+        }
 
-    this.socket.on('playerMoved', (data) => {
-      const player = this.otherPlayers[data.socketId];
-      if (player) {
-        player.targetX = data.x;
-        player.targetY = data.y - this.playerHeight;
-        player.targetZ = data.z;
-        player.targetRY = data.ry;
-        player.isSwimming = !!data.isSwimming;
-        player.isJumping = !!data.isJumping;
-        player.isRunning = !!data.isRunning;
-      }
-    });
+        this.applySpawnPosition(data);
+      });
 
-    this.socket.on('playerLeft', (socketId) => {
-      this.removeOtherPlayer(socketId);
-      this.updatePlayerCount();
-    });
+      this.socket.on('currentPlayers', (players) => {
+        for (const [socketId, data] of Object.entries(players)) {
+          if (this.isOwnPlayer(socketId, data)) continue;
+          this.addOtherPlayer(socketId, data);
+        }
+        this.updatePlayerCount();
+      });
 
-    this.socket.on('connect_error', (err) => {
-      console.error('Connection error:', err.message);
+      this.socket.on('playerJoined', (data) => {
+        if (this.isOwnPlayer(data.socketId, data)) return;
+        this.addOtherPlayer(data.socketId, data);
+        this.updatePlayerCount();
+      });
+
+      this.socket.on('playerMoved', (data) => {
+        const player = this.otherPlayers[data.socketId];
+        if (player) {
+          player.targetX = data.x;
+          player.targetY = data.y - this.playerHeight;
+          player.targetZ = data.z;
+          player.targetRY = data.ry;
+          player.isSwimming = !!data.isSwimming;
+          player.isFlying = !!data.isFlying;
+          player.isJumping = !!data.isJumping;
+          player.isRunning = !!data.isRunning;
+        }
+      });
+
+      this.socket.on('playerLeft', (socketId) => {
+        this.removeOtherPlayer(socketId);
+        this.updatePlayerCount();
+      });
+
+      this.socket.on('connect_error', (err) => {
+        console.error('Connection error:', err.message);
+        rejectInitialSpawn(err);
+      });
     });
   }
 
   async addOtherPlayer(socketId, data) {
+    if (!socketId || this.isOwnPlayer(socketId, data)) return;
+
     let player = this.otherPlayers[socketId];
     const footY = data.y - this.playerHeight;
 
@@ -2023,6 +2941,7 @@ class Game {
       player.targetZ = data.z;
       player.targetRY = data.ry || 0;
       player.isSwimming = !!data.isSwimming;
+      player.isFlying = !!data.isFlying;
       player.isJumping = !!data.isJumping;
       player.isRunning = !!data.isRunning;
       if (player.label) player.label.textContent = data.username;
@@ -2043,6 +2962,7 @@ class Game {
       targetZ: data.z,
       targetRY: data.ry || 0,
       isSwimming: !!data.isSwimming,
+      isFlying: !!data.isFlying,
       isJumping: !!data.isJumping,
       isRunning: !!data.isRunning,
       labelHeight: Game.CHARACTER_TARGET_HEIGHT + 0.35,
@@ -2124,6 +3044,8 @@ class Game {
       let animationState = 'idle';
       if (p.isSwimming && p.actions && p.actions.swim) {
         animationState = 'swim';
+      } else if (p.isFlying && p.actions && p.actions.jump) {
+        animationState = 'jump';
       } else if (p.isJumping && p.actions && p.actions.jump) {
         animationState = 'jump';
       } else if (p.isRunning && (p.actions && (p.actions.run || p.actions.walk))) {
@@ -2161,16 +3083,29 @@ class Game {
     const dt = Math.min(this.clock.getDelta(), 0.1);
 
     this.updateSky(dt);
+    if (this.debugMenuOpen) {
+      this.syncDebugMenuUI();
+    }
     this.updateMovement(dt);
     this.updateCamera();
     this.updateOtherPlayers(dt);
 
     // Update terrain around player
-    this.terrain.update(this.position.x, this.position.z);
+    this.terrain.update(this.position.x, this.position.z, this.camera);
 
     // Update HUD
     document.getElementById('coords').textContent =
       `X: ${Math.floor(this.position.x)} Y: ${Math.floor(this.position.y)} Z: ${Math.floor(this.position.z)}`;
+    
+    // Update FPS counter
+    this.frameCount++;
+    const currentTime = performance.now();
+    if (currentTime - this.fpsUpdateTime >= 1000) {
+      this.fps = this.frameCount;
+      this.frameCount = 0;
+      this.fpsUpdateTime = currentTime;
+      document.getElementById('fps-counter').textContent = `${this.fps} FPS`;
+    }
     
     // Update stamina bar
     const staminaBar = document.getElementById('stamina-bar');
@@ -2203,7 +3138,8 @@ class Game {
         rx: this.euler.x,
         ry: this.euler.y,
         isSwimming: this.isSwimming,
-        isJumping: this.jumpAnimationTimer > 0 && !this.isSwimming,
+        isFlying: this.isFlying,
+        isJumping: (this.isFlying || this.jumpAnimationTimer > 0) && !this.isSwimming,
         isRunning: this.isRunning,
       });
       this.lastSendTime = now;
@@ -2252,7 +3188,7 @@ class Game {
     const swimmingNow = initialWaterDepth > this.playerHeight * 0.5;
 
     // --- Stamina / Running ---
-    const wantsRun = this.keys[kb.run] && hasMoveInput && !inWater && !swimmingNow;
+    const wantsRun = !this.isFlying && this.keys[kb.run] && hasMoveInput && !inWater && !swimmingNow;
     if (wantsRun && !this.isExhausted && this.stamina > 0) {
       this.isRunning = true;
       this.stamina -= this.staminaDrainRate * dt;
@@ -2274,7 +3210,7 @@ class Game {
     // --- Crouching ---
     // Depends only on key state — no onGround check to avoid feedback loop.
     // Crouch lowers the camera only; physics height stays constant.
-    const wantsCrouch = this.keys[kb.crouch];
+  const wantsCrouch = !this.isFlying && this.keys[kb.crouch];
     this.isCrouching = wantsCrouch;
     const crouchTarget = wantsCrouch ? -1.4 : 0;  // how many units to drop camera
     this.crouchCameraOffset += (crouchTarget - this.crouchCameraOffset) * Math.min(1, dt * 12);
@@ -2294,37 +3230,50 @@ class Game {
     if (moveDir.lengthSq() > 0) {
       moveDir.normalize();
       let speed = this.moveSpeed;
+      if (this.isFlying) speed *= this.flightSpeedMultiplier;
       if (this.isRunning) speed *= this.runSpeedMultiplier;
       if (this.isCrouching) speed *= this.crouchSpeedMultiplier;
 
       // Slow down in water
-      if (inWater) speed *= (swimmingNow ? 0.4 : 0.6);
+      if (!this.isFlying && inWater) speed *= (swimmingNow ? 0.4 : 0.6);
 
       const newX = this.position.x + moveDir.x * speed * dt;
       const newZ = this.position.z + moveDir.z * speed * dt;
 
-      // Check slope angle at new position
-      const normal = this.terrain.getSurfaceNormal(newX, newZ);
-      // For 50 degree slope: cos(50°) ≈ 0.6428
-      // Only allow movement if slope is not too steep
-      const MAX_SLOPE_ANGLE = 50 * Math.PI / 180; // 50 degrees in radians
-      const minNormalY = Math.cos(MAX_SLOPE_ANGLE); // ~0.6428
-      
-      // If moving upward, check if slope is walkable
-      const currentGroundY = this.terrain.getHeight(this.position.x, this.position.z);
-      const newGroundY = this.terrain.getHeight(newX, newZ);
-      const isMovingUpward = newGroundY > currentGroundY;
-      
-      if (!isMovingUpward || normal.y >= minNormalY) {
-        // Slope is walkable or moving downward
+      if (this.isFlying) {
         this.position.x = newX;
         this.position.z = newZ;
+      } else {
+        // Check slope angle at new position
+        const normal = this.terrain.getSurfaceNormal(newX, newZ);
+        // For 50 degree slope: cos(50°) ≈ 0.6428
+        // Only allow movement if slope is not too steep
+        const MAX_SLOPE_ANGLE = 50 * Math.PI / 180; // 50 degrees in radians
+        const minNormalY = Math.cos(MAX_SLOPE_ANGLE); // ~0.6428
+
+        // If moving upward, check if slope is walkable
+        const currentGroundY = this.terrain.getHeight(this.position.x, this.position.z);
+        const newGroundY = this.terrain.getHeight(newX, newZ);
+        const isMovingUpward = newGroundY > currentGroundY;
+
+        if (!isMovingUpward || normal.y >= minNormalY) {
+          // Slope is walkable or moving downward
+          this.position.x = newX;
+          this.position.z = newZ;
+        }
+        // else: don't move (too steep)
       }
-      // else: don't move (too steep)
     }
 
     // --- Gravity & Swimming ---
-    if (swimmingNow) {
+    if (this.isFlying) {
+      const flightVerticalDirection = (this.keys[kb.jump] ? 1 : 0) - (this.keys[kb.crouch] ? 1 : 0);
+      if (flightVerticalDirection !== 0) {
+        this.position.y += flightVerticalDirection * this.moveSpeed * this.flightSpeedMultiplier * dt;
+      }
+
+      this.velocity.y = 0;
+    } else if (swimmingNow) {
       // Buoyancy / slow vertical movement
       this.velocity.y -= 15 * dt; // much slower gravity
 
@@ -2353,13 +3302,16 @@ class Game {
       this.position.y = groundY;
       this.velocity.y = 0;
       this.onGround = true;
+      if (this.isFlying) {
+        this.setFlying(false);
+      }
     } else {
       this.onGround = false;
     }
 
     const waterSurfaceY = this.getWaterSurfaceHeight(this.position.x, this.position.z);
     const waterDepth = waterSurfaceY - (this.position.y - this.playerHeight);
-    this.isSwimming = waterDepth > this.playerHeight * 0.5;
+    this.isSwimming = !this.isFlying && waterDepth > this.playerHeight * 0.5;
     this.isUnderwater = (this.position.y + this.crouchCameraOffset) < waterSurfaceY - 0.05;
     this.underwaterDepth = Math.max(0, waterSurfaceY - (this.position.y + this.crouchCameraOffset));
   }

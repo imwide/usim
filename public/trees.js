@@ -126,7 +126,7 @@ class TreeManager {
     canvas.width = 64; canvas.height = 64;
     const ctx = canvas.getContext('2d');
     if (name.includes('bark')) {
-      ctx.fillStyle = '#e8ddd0';
+      ctx.fillStyle = '#cfc6bb';
       ctx.fillRect(0, 0, 64, 64);
     } else {
       ctx.fillStyle = '#4a8a30';
@@ -177,12 +177,14 @@ class TreeManager {
     // ── Trunk materials ──
     this.trunkMaterialHigh = new THREE.MeshLambertMaterial({
       map: this.textures.barkHigh,
+      color: 0xbfb7ac,
       side: THREE.FrontSide,
       fog: true,
     });
 
     this.trunkMaterialLow = new THREE.MeshLambertMaterial({
       map: this.textures.barkLow || this.textures.barkHigh,
+      color: 0xb5ada2,
       side: THREE.FrontSide,
       fog: true,
     });
@@ -825,12 +827,72 @@ class TreeManager {
     return 'near';
   }
 
-  getChunkCenterDistSq(cx, cz, playerX, playerZ) {
-    const centerX = (cx + 0.5) * this.chunkWorldSize;
-    const centerZ = (cz + 0.5) * this.chunkWorldSize;
-    const dx = centerX - playerX;
-    const dz = centerZ - playerZ;
+  getTreeViewerPosition(playerX, playerZ, camera = null) {
+    const viewerX = camera && camera.position && Number.isFinite(camera.position.x)
+      ? camera.position.x
+      : playerX;
+    const viewerZ = camera && camera.position && Number.isFinite(camera.position.z)
+      ? camera.position.z
+      : playerZ;
+    const viewerY = camera && camera.position && Number.isFinite(camera.position.y)
+      ? camera.position.y
+      : this.terrain.getHeight(viewerX, viewerZ) + 2;
+
+    return { x: viewerX, y: viewerY, z: viewerZ };
+  }
+
+  getChunkMinDistanceSq(cx, cz, worldX, worldZ) {
+    if (this.terrain && typeof this.terrain.getChunkMinDistanceSq === 'function') {
+      return this.terrain.getChunkMinDistanceSq(cx, cz, worldX, worldZ);
+    }
+
+    const minX = cx * this.chunkWorldSize;
+    const minZ = cz * this.chunkWorldSize;
+    const maxX = minX + this.chunkWorldSize;
+    const maxZ = minZ + this.chunkWorldSize;
+    const nearestX = Math.max(minX, Math.min(maxX, worldX));
+    const nearestZ = Math.max(minZ, Math.min(maxZ, worldZ));
+    const dx = nearestX - worldX;
+    const dz = nearestZ - worldZ;
     return dx * dx + dz * dz;
+  }
+
+  buildTreeChunkBounds(cx, cz, trees) {
+    const minX = cx * this.chunkWorldSize;
+    const minZ = cz * this.chunkWorldSize;
+    const maxX = minX + this.chunkWorldSize;
+    const maxZ = minZ + this.chunkWorldSize;
+
+    if (!trees || trees.length === 0) {
+      const centerX = minX + this.chunkWorldSize * 0.5;
+      const centerZ = minZ + this.chunkWorldSize * 0.5;
+      const baseY = this.terrain.getHeight(centerX, centerZ);
+      return new THREE.Box3(
+        new THREE.Vector3(minX, baseY - 2, minZ),
+        new THREE.Vector3(maxX, baseY + 30, maxZ)
+      );
+    }
+
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const tree of trees) {
+      if (tree.height < minY) minY = tree.height;
+      const treeTop = tree.height + tree.scale * 30;
+      if (treeTop > maxY) maxY = treeTop;
+    }
+
+    return new THREE.Box3(
+      new THREE.Vector3(minX, minY - 2, minZ),
+      new THREE.Vector3(maxX, maxY + 2, maxZ)
+    );
+  }
+
+  getTreeChunkMinDistanceSq(chunk, worldX, worldY, worldZ) {
+    if (!chunk) return Infinity;
+    if (chunk.bounds && this.terrain && typeof this.terrain.getBoundsMinDistanceSq === 'function') {
+      return this.terrain.getBoundsMinDistanceSq(chunk.bounds, worldX, worldY, worldZ);
+    }
+    return this.getChunkMinDistanceSq(chunk.cx, chunk.cz, worldX, worldZ);
   }
 
   /**
@@ -840,10 +902,12 @@ class TreeManager {
     if (!this.sharedReady) return;
 
     this.camera = camera;
-    const pcx = Math.floor(playerX / this.chunkWorldSize);
-    const pcz = Math.floor(playerZ / this.chunkWorldSize);
+    const viewer = this.getTreeViewerPosition(playerX, playerZ, camera);
+    const pcx = Math.floor(viewer.x / this.chunkWorldSize);
+    const pcz = Math.floor(viewer.z / this.chunkWorldSize);
     const needed = new Set();
     const maxViewDist = this.treeViewDistance;
+    const maxViewDistanceSq = ((maxViewDist + 0.5) * this.chunkWorldSize) ** 2;
 
     // Update camera frustum for culling
     this._frustumMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -855,16 +919,17 @@ class TreeManager {
         const cx = pcx + dx;
         const cz = pcz + dz;
         const key = `${cx},${cz}`;
-        const distSq = this.getChunkCenterDistSq(cx, cz, playerX, playerZ);
+        const existing = this.treeChunks.get(key);
+        const distSq = existing
+          ? this.getTreeChunkMinDistanceSq(existing, viewer.x, viewer.y, viewer.z)
+          : this.getChunkMinDistanceSq(cx, cz, viewer.x, viewer.z);
         const dist = Math.sqrt(distSq);
 
         // Beyond view range
-        if (dist > (maxViewDist + 0.5) * this.chunkWorldSize) continue;
+        if (distSq > maxViewDistanceSq) continue;
 
         needed.add(key);
         const desiredLod = this.getLodForDistance(dist);
-
-        const existing = this.treeChunks.get(key);
 
         if (existing) {
           existing.distSq = distSq;
@@ -886,7 +951,7 @@ class TreeManager {
           }
         } else {
           // Create new tree chunk
-          this.createTreeChunk(cx, cz, key, distSq, desiredLod);
+          this.createTreeChunk(cx, cz, key, distSq, desiredLod, viewer);
         }
       }
     }
@@ -914,16 +979,25 @@ class TreeManager {
     );
   }
 
-  createTreeChunk(cx, cz, key, distSq, lod) {
+  createTreeChunk(cx, cz, key, distSq, lod, viewer = null) {
     const trees = this.getTreePositionsForChunk(cx, cz);
+    const bounds = this.buildTreeChunkBounds(cx, cz, trees);
     if (trees.length === 0) {
       // Still track the chunk so we don't re-compute
-      this.treeChunks.set(key, {
+      const chunk = {
         cx, cz, key, trees: [], meshGroup: null, currentLod: lod,
         centerX: (cx + 0.5) * this.chunkWorldSize,
         centerZ: (cz + 0.5) * this.chunkWorldSize,
         distSq,
+        bounds,
         lodMeshCache: {},
+      };
+      if (viewer) {
+        chunk.distSq = this.getTreeChunkMinDistanceSq(chunk, viewer.x, viewer.y, viewer.z);
+      }
+      this.treeChunks.set(key, {
+        ...chunk,
+        currentLod: this.getLodForDistance(Math.sqrt(chunk.distSq)),
       });
       return;
     }
@@ -933,8 +1007,14 @@ class TreeManager {
       centerX: (cx + 0.5) * this.chunkWorldSize,
       centerZ: (cz + 0.5) * this.chunkWorldSize,
       distSq,
+      bounds,
       lodMeshCache: {},
     };
+
+    if (viewer) {
+      chunk.distSq = this.getTreeChunkMinDistanceSq(chunk, viewer.x, viewer.y, viewer.z);
+      lod = this.getLodForDistance(Math.sqrt(chunk.distSq));
+    }
 
     this.treeChunks.set(key, chunk);
     this.setChunkLod(chunk, lod);

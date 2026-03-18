@@ -7,7 +7,6 @@ For the second and last LOD of the grass, instead of placing the billboards in a
 
 
 
-Tree LODs should not be based on chunk distance, but on the distance ot the camera, just like grass LODs.
 
 Improve tree quality:
 At trees closer than 100m:

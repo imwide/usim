@@ -26,17 +26,17 @@ function generateBark(width, height, filename) {
   const ctx = canvas.getContext('2d');
   const rng = seededRandom(12345);
 
-  // Base color – creamy white birch
-  ctx.fillStyle = '#e8ddd0';
+  // Base color – slightly muted birch to avoid glowing trunks in-engine
+  ctx.fillStyle = '#d4cbc0';
   ctx.fillRect(0, 0, width, height);
 
   // Add subtle vertical grain
   for (let x = 0; x < width; x++) {
     for (let y = 0; y < height; y += 2) {
       const noise = (rng() - 0.5) * 15;
-      const r = 232 + noise;
-      const g = 221 + noise;
-      const b = 208 + noise;
+      const r = 212 + noise;
+      const g = 203 + noise;
+      const b = 192 + noise;
       ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
       ctx.fillRect(x, y, 1, 2);
     }

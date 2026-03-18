@@ -955,6 +955,13 @@ class Game {
     const daylightFactor = Math.max(0, Math.min(1, (sunElev + 0.2) / 0.7));
     const horizonSoftness = Math.max(0, Math.min(1, (sunElev + 0.02) / 0.32));
     const aboveHorizonFade = Math.max(0, Math.min(1, sunElev / 0.18));
+    const smoothstep = (edge0, edge1, x) => {
+      const span = Math.max(edge1 - edge0, 0.0001);
+      const v = Math.max(0, Math.min(1, (x - edge0) / span));
+      return v * v * (3 - 2 * v);
+    };
+    const peakDayWindow = smoothstep(8 / 24, 9 / 24, t) * (1 - smoothstep(15.5 / 24, 16 / 24, t));
+    const peakTerrainDayFactor = peakDayWindow;
 
     // ---- Sky gradient keyframes [t, [topR,G,B], [horizR,G,B]] ----
     const phases = [
@@ -1010,6 +1017,13 @@ class Game {
       this.waterUniforms.uTime.value = this.waterTime;
       this.waterUniforms.uDayFactor.value = daylightFactor;
       this.updateWaterPatch();
+    }
+
+    if (this.terrain && this.terrain.terrainUniforms && this.terrain.terrainUniforms.uDayFactor) {
+      this.terrain.terrainUniforms.uDayFactor.value = daylightFactor;
+      if (this.terrain.terrainUniforms.uPeakDayFactor) {
+        this.terrain.terrainUniforms.uPeakDayFactor.value = peakTerrainDayFactor;
+      }
     }
 
     // ---- Sun appearance (always bright white core) ----

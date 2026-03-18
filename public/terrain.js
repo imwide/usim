@@ -286,6 +286,8 @@ class TerrainManager {
   createTerrainMaterial() {
     this.terrainUniforms = {
       uPlayerXZ: { value: new THREE.Vector2(0, 0) },
+      uDayFactor: { value: 1 },
+      uPeakDayFactor: { value: 0 },
       uGrassTileSize: { value: this.terrainGrassTileSize },
       uTextureMediumDistance: { value: this.terrainTextureMediumDistance },
       uTextureFarDistance: { value: this.terrainTextureFarDistance },
@@ -317,6 +319,8 @@ class TerrainManager {
 
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uTerrainPlayerXZ = this.terrainUniforms.uPlayerXZ;
+      shader.uniforms.uTerrainDayFactor = this.terrainUniforms.uDayFactor;
+      shader.uniforms.uTerrainPeakDayFactor = this.terrainUniforms.uPeakDayFactor;
       shader.uniforms.uTerrainGrassTileSize = this.terrainUniforms.uGrassTileSize;
       shader.uniforms.uTerrainTextureMediumDistance = this.terrainUniforms.uTextureMediumDistance;
       shader.uniforms.uTerrainTextureFarDistance = this.terrainUniforms.uTextureFarDistance;
@@ -369,6 +373,8 @@ class TerrainManager {
         uniform sampler2D uTerrainGrassMedium;
         uniform sampler2D uTerrainGrassLow;
         uniform vec2 uTerrainPlayerXZ;
+        uniform float uTerrainDayFactor;
+        uniform float uTerrainPeakDayFactor;
         uniform float uTerrainGrassTileSize;
         uniform float uTerrainTextureMediumDistance;
         uniform float uTerrainTextureFarDistance;
@@ -489,9 +495,16 @@ class TerrainManager {
           vec3 grassTex = mix(grassHigh, grassMedium, highToMedium);
           grassTex = mix(grassTex, grassLow, mediumToLow);
           float terrainLuma = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
-          vec3 grassTint = mix(vec3(0.9, 1.02, 0.84), vec3(1.02, 1.1, 0.94), clamp(terrainLuma, 0.0, 1.0));
-          vec3 texturedGrass = grassTex * grassTint * mix(0.88, 1.05, terrainLuma);
-          diffuseColor.rgb = mix(diffuseColor.rgb, texturedGrass, effectiveGrassMask);
+          float peakDayFactor = clamp(uTerrainPeakDayFactor, 0.0, 1.0);
+          vec3 grassTint = mix(vec3(0.76, 0.86, 0.70), vec3(0.88, 0.96, 0.80), clamp(terrainLuma, 0.0, 1.0));
+          vec3 texturedGrass = grassTex * grassTint * mix(0.66, 0.84, terrainLuma);
+          vec3 grassBrightnessCap = diffuseColor.rgb * mix(0.92, 0.98, terrainLuma) + vec3(0.018, 0.024, 0.014);
+          texturedGrass *= mix(vec3(1.0), vec3(0.74, 0.82, 0.67), peakDayFactor);
+          texturedGrass *= mix(1.0, 0.60, peakDayFactor);
+          texturedGrass = mix(texturedGrass, diffuseColor.rgb * vec3(0.82, 0.90, 0.75), peakDayFactor * 0.30);
+          grassBrightnessCap *= mix(1.0, 0.64, peakDayFactor);
+          texturedGrass = min(texturedGrass, grassBrightnessCap);
+          diffuseColor.rgb = mix(diffuseColor.rgb, texturedGrass, effectiveGrassMask * 0.95);
         }
 
         float terrainUnderwaterMask = 1.0 - smoothstep(uTerrainWaterLevel - 1.0, uTerrainWaterLevel + 2.5, vTerrainWorldPos.y);
@@ -515,7 +528,7 @@ class TerrainManager {
       );
     };
 
-    material.customProgramCacheKey = () => 'terrain-grass-texture-v5';
+    material.customProgramCacheKey = () => 'terrain-grass-texture-v9';
     return material;
   }
 

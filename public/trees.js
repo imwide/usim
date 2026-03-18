@@ -2,10 +2,11 @@
  * Tree system – procedural birch trees with LOD and instanced rendering.
  *
  * LOD levels:
- *   0  (billboard)   – far camera-facing quad, lower-res billboard texture
- *   1  (low)         – mid-distance camera-facing quad, full-res billboard texture
- *   2  (high)        – standard 3-D tree for 100m-250m range
- *   3  (near)        – enhanced 3-D tree for the closest 100m range
+ *   0  (distant)     – far dark ground spots to extend forests toward the horizon
+ *   1  (billboard)   – far camera-facing quad, lower-res billboard texture
+ *   2  (low)         – mid-distance camera-facing quad, full-res billboard texture
+ *   3  (high)        – standard 3-D tree for 90m-230m range
+ *   4  (near)        – enhanced 3-D tree for the closest 90m range
  *
  * Trees are distributed using Perlin noise so placement is deterministic per seed.
  * The system piggy-backs on TerrainManager's chunk grid for streaming.
@@ -43,14 +44,17 @@ class TreeManager {
     this.maxTreesPerChunk = 10000;   // effectively unlimited – density is controlled by noise
 
     // LOD distances (world units from camera)
-    this.lodBillboardDistance = 600;  // beyond this → far billboard
-    this.lodLowDistance = 230;        // beyond this → mid billboard
-    this.lodHighDistance = 90;        // beyond this → standard 3-D, closer → enhanced 3-D
+    this.lodBillboardDistance = 600;      // beyond this → far billboard
+    this.lodDistantSpotDistance = 1100;  // beyond this → dark ground spots
+    this.lodDistantSpotMaxDistance = Infinity; // extends to full terrain render distance
+    this.lodLowDistance = 230;            // beyond this → mid billboard
+    this.lodHighDistance = 90;            // beyond this → standard 3-D, closer → enhanced 3-D
     this.treeLodFadeDistance = 24;
     this.billboardTreeRenderFraction = 2 / 3;
+    this.distantSpotScaleMultiplier = 1.8;
 
-    // View distance for tree chunks (in chunks)
-    this.treeViewDistance = 8;
+    // View distance for tree chunks (in chunks) – always matches terrain render distance
+    // (this.treeViewDistance is a getter defined below the constructor)
     this.treeViewUnloadBufferChunks = 0.75;
     this.treeFrustumCullPadding = 12;
 
@@ -67,6 +71,8 @@ class TreeManager {
     this.billboardGeo = null;
     this.billboardMat = null;
     this.billboardMatLow = null;
+    this.distantSpotGeo = null;
+    this.distantSpotMat = null;
     this.trunkMaterialNear = null;
     this.trunkMaterialHigh = null;
     this.leafMaterialNear = null;
@@ -81,12 +87,13 @@ class TreeManager {
     this.paletteMetrics = [];
     this.paletteDirty = true;
 
-    this.treeLodKeys = ['near', 'high', 'low', 'billboard'];
+    this.treeLodKeys = ['near', 'high', 'low', 'billboard', 'distant'];
     this.treeLodBitmask = {
       near: 1,
       high: 2,
       low: 4,
       billboard: 8,
+      distant: 16,
     };
 
     this.treeStreamingIntervalMs = 50;
@@ -117,6 +124,11 @@ class TreeManager {
     this._frustum = new THREE.Frustum();
     this._frustumMatrix = new THREE.Matrix4();
     this._treeCullBox = new THREE.Box3();
+  }
+
+  /** Always mirrors the terrain render distance so distant spots fill the whole view. */
+  get treeViewDistance() {
+    return this.terrain.viewDistance;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -260,6 +272,51 @@ class TreeManager {
     return variant;
   }
 
+  createDistantTreeSpotTexture(size = 96) {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) {
+      return this.generateFallbackTexture('tree-distant-spot');
+    }
+
+    const rng = this.seededRandom(41721);
+    ctx.clearRect(0, 0, size, size);
+
+    for (let i = 0; i < 8; i++) {
+      const cx = size * (0.5 + (rng() - 0.5) * 0.34);
+      const cy = size * (0.5 + (rng() - 0.5) * 0.28);
+      const rx = size * (0.15 + rng() * 0.12);
+      const ry = size * (0.1 + rng() * 0.1);
+      const tone = 255;
+      ctx.fillStyle = `rgba(${tone},${tone},${tone},${0.3 + rng() * 0.3})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, rng() * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const grad = ctx.createRadialGradient(size * 0.5, size * 0.5, size * 0.08, size * 0.5, size * 0.5, size * 0.5);
+    grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+    grad.addColorStop(0.42, 'rgba(255,255,255,0.65)');
+    grad.addColorStop(0.78, 'rgba(255,255,255,0.25)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.encoding = THREE.sRGBEncoding;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    texture.premultiplyAlpha = false;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
   bleedTransparentCanvasColors(ctx, width, height, iterations = 12) {
     if (!ctx || width <= 0 || height <= 0) return;
 
@@ -343,7 +400,38 @@ class TreeManager {
     this.billboardMatLow = this.createTreeLodMaterial({
       map: this.textures.billboardLow || this.textures.billboardHigh,
       ...billboardBase,
-    }, this.lodBillboardDistance, Infinity);
+    }, this.lodBillboardDistance, this.lodDistantSpotDistance, 120, 90);
+
+    // ── Distant tree spots ──
+    this.textures.distantSpot = this.textures.distantSpot || this.createDistantTreeSpotTexture();
+    this.distantSpotGeo = new THREE.PlaneGeometry(12, 12);
+    this.distantSpotGeo.rotateX(-Math.PI * 0.5);
+    this.distantSpotGeo.translate(0, 0.18, 0);
+
+    const distantSpotBase = {
+      // MeshLambertMaterial so it correctly darkens at night like real trees
+      map: this.textures.distantSpot,
+      color: 0x070f07, // very dark, vivid green with near-zero blue – after warm sun + blue ambient multiplication lands as dark saturated forest green
+      transparent: true,
+      opacity: 1.0,
+      alphaTest: 0.02,
+      alphaToCoverage: false,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      depthTest: true,
+      fog: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -2,
+      useDitherFade: false,
+    };
+    this.distantSpotMat = this.createTreeLodMaterial(
+      distantSpotBase,
+      this.lodDistantSpotDistance,
+      this.lodDistantSpotMaxDistance,
+      180,
+      60
+    );
 
     // ── Trunk materials ──
     const trunkBase = {
@@ -404,10 +492,11 @@ class TreeManager {
     const {
       useDitherFade = true,
       billboardMode = null,
+      materialClass = THREE.MeshLambertMaterial,
       ...meshMaterialOptions
     } = materialOptions || {};
     const maxDistance = Number.isFinite(visibleMaxDistance) ? visibleMaxDistance : 1e9;
-    const material = new THREE.MeshLambertMaterial({
+    const material = new materialClass({
       ...meshMaterialOptions,
       transparent: meshMaterialOptions.transparent === true,
       alphaToCoverage: meshMaterialOptions.alphaToCoverage === true,
@@ -1136,6 +1225,10 @@ class TreeManager {
 
     const trees = chunk.trees;
 
+    if (lod === 'distant') {
+      return this.createDistantSpotInstances(trees);
+    }
+
     if (lod === 'billboard' || lod === 'low') {
       return this.createBillboardInstances(trees, lod);
     }
@@ -1209,11 +1302,39 @@ class TreeManager {
       quat.setFromAxisAngle(this._yAxis, rotY);
     }
 
+    const lodScaleMultiplier = lod === 'distant' ? this.distantSpotScaleMultiplier : 1;
+
     mat4.compose(
       this._v3.set(tree.wx, tree.height, tree.wz),
       quat,
-      this._scale.set(tree.scale, tree.scale, tree.scale)
+      this._scale.set(
+        tree.scale * lodScaleMultiplier,
+        tree.scale * lodScaleMultiplier,
+        tree.scale * lodScaleMultiplier
+      )
     );
+  }
+
+  createDistantSpotInstances(trees) {
+    if (trees.length === 0) return null;
+
+    const mesh = new THREE.InstancedMesh(this.distantSpotGeo, this.distantSpotMat, trees.length);
+    mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false;
+    mesh.userData.isTreeDistantSpot = true;
+    mesh.userData.treeLod = 'distant';
+    mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+    const mat4 = this._mat4;
+    const quat = this._quat;
+
+    for (let i = 0; i < trees.length; i++) {
+      const t = trees[i];
+      this.composeTreeMatrix(mat4, quat, t, 'distant', t.rotY);
+      mesh.setMatrixAt(i, mat4);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.updateMatrix();
+    return mesh;
   }
 
   createBillboardInstances(trees, lod = 'low') {
@@ -1344,6 +1465,8 @@ class TreeManager {
   // ═══════════════════════════════════════════════════════════════
 
   getLodForDistance(dist) {
+    if (dist > this.lodDistantSpotMaxDistance) return null;
+    if (dist > this.lodDistantSpotDistance) return 'distant';
     if (dist > this.lodBillboardDistance) return 'billboard';
     if (dist > this.lodLowDistance) return 'low';
     if (dist > this.lodHighDistance) return 'high';
@@ -1501,12 +1624,19 @@ class TreeManager {
           effectiveMax: this.lodBillboardDistance,
         };
       case 'billboard':
-      default:
         return {
           min: this.lodBillboardDistance,
-          max: Infinity,
+          max: this.lodDistantSpotDistance,
           effectiveMin: Math.max(0, this.lodBillboardDistance - fade),
-          effectiveMax: Infinity,
+          effectiveMax: this.lodDistantSpotDistance,
+        };
+      case 'distant':
+      default:
+        return {
+          min: this.lodDistantSpotDistance,
+          max: this.lodDistantSpotMaxDistance,
+          effectiveMin: Math.max(0, this.lodDistantSpotDistance - fade),
+          effectiveMax: this.lodDistantSpotMaxDistance,
         };
     }
   }
@@ -1521,7 +1651,10 @@ class TreeManager {
     }
 
     if (!activeLods.length) {
-      activeLods.push(this.getLodForDistance(minDist));
+      const fallbackLod = this.getLodForDistance(minDist);
+      if (fallbackLod) {
+        activeLods.push(fallbackLod);
+      }
     }
 
     return activeLods;
@@ -1537,7 +1670,10 @@ class TreeManager {
     }
 
     if (activeMask === 0) {
-      activeMask = this.treeLodBitmask[this.getLodForDistance(minDist)];
+      const fallbackLod = this.getLodForDistance(minDist);
+      if (fallbackLod) {
+        activeMask = this.treeLodBitmask[fallbackLod];
+      }
     }
 
     return activeMask;
@@ -1569,6 +1705,13 @@ class TreeManager {
 
     chunk.distSq = range.minSq;
     chunk.maxDistSq = range.maxSq;
+
+    if (!chunk.meshGroup && activeLodMask === 0) {
+      chunk.activeLodMask = 0;
+      chunk.activeLods = [];
+      chunk.currentLod = null;
+      return;
+    }
 
     if (!chunk.meshGroup) {
       chunk.meshGroup = new THREE.Group();
@@ -1605,7 +1748,9 @@ class TreeManager {
 
       chunk.activeLodMask = activeLodMask;
       chunk.activeLods = this.getLodListFromMask(activeLodMask);
-      chunk.currentLod = chunk.activeLods.length === 1 ? chunk.activeLods[0] : 'mixed';
+      chunk.currentLod = chunk.activeLods.length === 1
+        ? chunk.activeLods[0]
+        : (chunk.activeLods.length > 1 ? 'mixed' : null);
     }
   }
 
@@ -1821,6 +1966,8 @@ class TreeManager {
     if (this.billboardGeo) this.billboardGeo.dispose();
     if (this.billboardMat) this.billboardMat.dispose();
     if (this.billboardMatLow) this.billboardMatLow.dispose();
+    if (this.distantSpotGeo) this.distantSpotGeo.dispose();
+    if (this.distantSpotMat) this.distantSpotMat.dispose();
     if (this.trunkMaterialNear) this.trunkMaterialNear.dispose();
     if (this.trunkMaterialHigh) this.trunkMaterialHigh.dispose();
     if (this.leafMaterialNear) this.leafMaterialNear.dispose();

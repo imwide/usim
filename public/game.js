@@ -105,6 +105,15 @@ class Game {
     this.crouchSpeedMultiplier = 0.4;
     this.jumpAnimationTimer = 0;
     this.jumpAnimationDuration = 0.7;
+    this.smoothedMovementDt = 1 / 60;
+    this.movementDtResponse = 12;
+    this.movementDtMaxStepScale = 1.25;
+
+    // Reusable movement helpers to avoid per-frame allocations and GC hitches.
+    this._moveForward = new THREE.Vector3();
+    this._moveRight = new THREE.Vector3();
+    this._moveDir = new THREE.Vector3();
+    this._moveYawEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
     // Settings (loaded from localStorage)
     this.settings = Game.loadSettings();
@@ -177,6 +186,18 @@ class Game {
     this.fps = 0;
     this.frameCount = 0;
     this.fpsUpdateTime = 0;
+
+    this.hud = {
+      coords: document.getElementById('coords'),
+      fps: document.getElementById('fps-counter'),
+      staminaBar: document.getElementById('stamina-bar'),
+      crouchIndicator: document.getElementById('crouch-indicator'),
+    };
+    this.lastHudCoordsText = '';
+    this.lastHudFpsText = '';
+    this.lastHudStaminaWidth = '';
+    this.lastHudStaminaBackground = '';
+    this.lastHudCrouchDisplay = '';
 
     // Resize
     window.addEventListener('resize', () => this.onResize());
@@ -773,7 +794,14 @@ class Game {
     }
     if (this.trees) {
       for (const [, treeChunk] of this.trees.treeChunks) {
-        if (!treeChunk.meshGroup) continue;
+        if (
+          Math.abs(treeChunk.cx - pcx) > 4 ||
+          Math.abs(treeChunk.cz - pcz) > 4 ||
+          !treeChunk.meshGroup ||
+          !treeChunk.meshGroup.visible
+        ) {
+          continue;
+        }
         if (treeChunk.meshGroup.isGroup) {
           treeChunk.meshGroup.traverse((child) => {
             if (child.isInstancedMesh && child.userData.isTreeTrunk) {
@@ -2759,11 +2787,6 @@ class Game {
     const imageData = rCtx.createImageData(sw, sh);
     const pixels = imageData.data;
 
-    const noise = this.noise;
-    const noiseScale = this.trees.treeNoiseScale;
-    const noiseOffX = this.trees.treeNoiseOffsetX;
-    const noiseOffZ = this.trees.treeNoiseOffsetZ;
-    const threshold = this.trees.treeNoiseThreshold;
     const span = halfSpan * 2;
     const minX = centerX - halfSpan;
     const minZ = centerZ - halfSpan;
@@ -2789,15 +2812,10 @@ class Game {
         const normalY = 1 / Math.sqrt(dxH * dxH + 1 + dzH * dzH);
         if (normalY < 0.82) continue;
 
-        // Sample tree noise
-        const n = noise.perlin2(
-          (worldX + noiseOffX) * noiseScale,
-          (worldZ + noiseOffZ) * noiseScale
-        ) * 0.5 + 0.5;
-        if (n < threshold) continue;
+        const density = this.trees.getTreeSpawnDensity(worldX, worldZ, h - this.waterLevel);
+        if (density <= 0.001) continue;
 
         // Map density to alpha (denser = more opaque)
-        const density = (n - threshold) / (1 - threshold);
         const alpha = Math.round(density * 150);
 
         const offset = (y * sw + x) * 4;
@@ -3377,20 +3395,35 @@ class Game {
     }
   }
 
+  getStableMovementDelta(rawDt) {
+    const dt = Math.min(Math.max(rawDt, 1 / 240), 0.1);
+
+    if (!Number.isFinite(this.smoothedMovementDt) || this.smoothedMovementDt <= 0) {
+      this.smoothedMovementDt = dt;
+      return dt;
+    }
+
+    const stabilizedTarget = Math.min(dt, this.smoothedMovementDt * this.movementDtMaxStepScale);
+    const response = Math.min(1, dt * this.movementDtResponse);
+    this.smoothedMovementDt += (stabilizedTarget - this.smoothedMovementDt) * response;
+    return this.smoothedMovementDt;
+  }
+
   animate() {
     if (!this.running) return;
     requestAnimationFrame(() => this.animate());
 
-    const dt = Math.min(this.clock.getDelta(), 0.1);
+    const rawDt = Math.min(this.clock.getDelta(), 0.1);
+    const movementDt = this.getStableMovementDelta(rawDt);
 
-    this.updateSky(dt);
+    this.updateSky(rawDt);
     if (this.debugMenuOpen) {
       this.syncDebugMenuUI();
     }
-    this.updateMovement(dt);
+    this.updateMovement(movementDt);
     this.syncDistanceFadeEnvironment();
     this.updateCamera();
-    this.updateOtherPlayers(dt);
+    this.updateOtherPlayers(rawDt);
 
     // Update terrain around player
     this.terrain.update(this.position.x, this.position.z, this.camera);
@@ -3399,8 +3432,11 @@ class Game {
     this.trees.update(this.position.x, this.position.z, this.camera);
 
     // Update HUD
-    document.getElementById('coords').textContent =
-      `X: ${Math.floor(this.position.x)} Y: ${Math.floor(this.position.y)} Z: ${Math.floor(this.position.z)}`;
+    const coordsText = `X: ${Math.floor(this.position.x)} Y: ${Math.floor(this.position.y)} Z: ${Math.floor(this.position.z)}`;
+    if (this.hud.coords && coordsText !== this.lastHudCoordsText) {
+      this.hud.coords.textContent = coordsText;
+      this.lastHudCoordsText = coordsText;
+    }
     
     // Update FPS counter
     this.frameCount++;
@@ -3409,21 +3445,35 @@ class Game {
       this.fps = this.frameCount;
       this.frameCount = 0;
       this.fpsUpdateTime = currentTime;
-      document.getElementById('fps-counter').textContent = `${this.fps} FPS`;
+      const fpsText = `${this.fps} FPS`;
+      if (this.hud.fps && fpsText !== this.lastHudFpsText) {
+        this.hud.fps.textContent = fpsText;
+        this.lastHudFpsText = fpsText;
+      }
     }
     
     // Update stamina bar
-    const staminaBar = document.getElementById('stamina-bar');
     const staminaPct = (this.stamina / this.maxStamina) * 100;
-    staminaBar.style.width = staminaPct + '%';
+    const staminaWidth = `${Math.max(0, Math.min(100, staminaPct)).toFixed(1)}%`;
+    if (this.hud.staminaBar && staminaWidth !== this.lastHudStaminaWidth) {
+      this.hud.staminaBar.style.width = staminaWidth;
+      this.lastHudStaminaWidth = staminaWidth;
+    }
     // Turn bar red when exhausted
-    staminaBar.style.background = this.isExhausted
+    const staminaBackground = this.isExhausted
       ? 'linear-gradient(90deg, #ff4444, #ff8800)'
       : 'linear-gradient(90deg, #00d2ff, #7b2ff7)';
+    if (this.hud.staminaBar && staminaBackground !== this.lastHudStaminaBackground) {
+      this.hud.staminaBar.style.background = staminaBackground;
+      this.lastHudStaminaBackground = staminaBackground;
+    }
     
     // Update crouch indicator — only toggle display when state actually changes
-    const crouchInd = document.getElementById('crouch-indicator');
-    crouchInd.style.display = this.isCrouching ? 'block' : 'none';
+    const crouchDisplay = this.isCrouching ? 'block' : 'none';
+    if (this.hud.crouchIndicator && crouchDisplay !== this.lastHudCrouchDisplay) {
+      this.hud.crouchIndicator.style.display = crouchDisplay;
+      this.lastHudCrouchDisplay = crouchDisplay;
+    }
 
     if (this.phoneOpen || this.phoneDocked) {
       this.updatePhoneClock();
@@ -3515,18 +3565,17 @@ class Game {
     // --- Crouching ---
     // Depends only on key state — no onGround check to avoid feedback loop.
     // Crouch lowers the camera only; physics height stays constant.
-  const wantsCrouch = !this.isFlying && this.keys[kb.crouch];
+    const wantsCrouch = !this.isFlying && this.keys[kb.crouch];
     this.isCrouching = wantsCrouch;
     const crouchTarget = wantsCrouch ? -1.4 : 0;  // how many units to drop camera
     this.crouchCameraOffset += (crouchTarget - this.crouchCameraOffset) * Math.min(1, dt * 12);
 
     // --- Movement direction ---
-    const forward = new THREE.Vector3(0, 0, -1);
-    forward.applyEuler(new THREE.Euler(0, this.euler.y, 0));
-    const right = new THREE.Vector3(1, 0, 0);
-    right.applyEuler(new THREE.Euler(0, this.euler.y, 0));
+    const yawEuler = this._moveYawEuler.set(0, this.euler.y, 0, 'YXZ');
+    const forward = this._moveForward.set(0, 0, -1).applyEuler(yawEuler);
+    const right = this._moveRight.set(1, 0, 0).applyEuler(yawEuler);
 
-    const moveDir = new THREE.Vector3(0, 0, 0);
+    const moveDir = this._moveDir.set(0, 0, 0);
     if (this.keys[kb.forward])  moveDir.add(forward);
     if (this.keys[kb.backward]) moveDir.sub(forward);
     if (this.keys[kb.right])    moveDir.add(right);

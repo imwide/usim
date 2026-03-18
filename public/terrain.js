@@ -118,7 +118,9 @@ class TerrainManager {
     this.grassBillboardWidth = this.grassBaseWidth * 13.4;
     this.grassFarBillboardWidth = this.grassBillboardWidth * 4;
     this.grassFarBillboardStitchCount = 4;
-    this.grassFarBillboardFrequencyMultiplier = 0.45;
+    this.grassSimpleBillboardWidth = this.grassFarBillboardWidth * 2;
+    this.grassSimpleBillboardStitchCount = this.grassFarBillboardStitchCount * 2;
+    this.grassFarBillboardFrequencyMultiplier = 0.27;
     this.grassBillboardHeight = this.grassHeight * 1.12;
     this.grassBillboardVariantCount = 10;
     this.grassBillboardAtlasColumns = 5;
@@ -659,10 +661,13 @@ class TerrainManager {
     this.grassFarBillboardTexture = this.createGrassBillboardTexture({
       stitchedCopies: this.grassFarBillboardStitchCount,
     });
+    this.grassSimpleBillboardTexture = this.createGrassBillboardTexture({
+      stitchedCopies: this.grassSimpleBillboardStitchCount,
+    });
     this.grassUltraGeometry = this.createDetailedGrassBladeGeometry(this.grassHeight, this.grassBaseWidth, 4);
     this.grassUltraBillboardGeometry = this.createGrassBillboardGeometry(this.grassBillboardHeight, this.grassBillboardWidth);
     this.grassDetailedGeometry = this.createGrassBillboardGeometry(this.grassBillboardHeight, this.grassFarBillboardWidth);
-    this.grassSimpleGeometry = this.grassDetailedGeometry;
+    this.grassSimpleGeometry = this.createGrassBillboardGeometry(this.grassBillboardHeight, this.grassSimpleBillboardWidth);
     this.grassUltraMaterial = this.createGrassMaterial(0, this.grassUltraNearDistance, this.grassUltraFadeDistance);
     this.grassUltraBillboardMaterial = this.createGrassBillboardMaterial(
       0,
@@ -683,7 +688,7 @@ class TerrainManager {
       this.grassRenderDistance,
       this.grassLodFadeDistance,
       Math.max(6, this.grassLodFadeDistance * 0.55),
-      this.grassFarBillboardTexture
+      this.grassSimpleBillboardTexture
     );
     this.grassUltraMesh = null;
     this.grassUltraBillboardMesh = null;

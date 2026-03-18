@@ -20,22 +20,39 @@ class TreeManager {
     // ── Configuration ──────────────────────────────────────────
     this.chunkWorldSize = terrain.chunkWorldSize; // match terrain chunks
     this.treeCellSize = 5;           // spacing grid cell in world units
-    this.treeMinElevation = 18;      // above sea-level minimum
-    this.treeMaxElevation = 420;     // above sea-level maximum
+    this.treeMinElevation = 18;      // preferred lower tree line above sea level
+    this.treeMaxElevation = 420;     // preferred upper tree line above sea level
+    this.treeLowElevationFadeRange = 24;
+    this.treeHighElevationFadeRange = 140;
     this.treeMaxSlope = 0.82;        // max normal-Y (cos of slope angle)
     this.treeNoiseScale = 0.0045;    // perlin scale for distribution
     this.treeNoiseThreshold = 0.30;  // noise floor – below this, no trees at all
     this.treeNoiseOffsetX = 4871.3;
     this.treeNoiseOffsetZ = -2917.8;
+    this.treeForestMaskScale = 1 / 3400; // broad forest regions around 3-4km across
+    this.treeForestMaskThreshold = 0.5;  // darkest 50% blocks trees, brightest 50% allows them
+    this.treeForestMaskEdgeFeather = 0.035;
+    this.treeForestMaskEdgeJitterScale = 1 / 55;
+    this.treeForestMaskEdgeJitterDistance = 50;
+    this.treeForestMaskOffsetX = -8241.6;
+    this.treeForestMaskOffsetZ = 6117.9;
+    this.treeForestMaskJitterOffsetX = 1823.4;
+    this.treeForestMaskJitterOffsetZ = -4621.9;
+    this.treeForestMaskJitterOffsetX2 = -3157.2;
+    this.treeForestMaskJitterOffsetZ2 = 2874.6;
     this.maxTreesPerChunk = 10000;   // effectively unlimited – density is controlled by noise
 
     // LOD distances (world units from camera)
     this.lodBillboardDistance = 600;  // beyond this → far billboard
-    this.lodLowDistance = 250;        // beyond this → mid billboard
-    this.lodHighDistance = 100;       // beyond this → standard 3-D, closer → enhanced 3-D
+    this.lodLowDistance = 230;        // beyond this → mid billboard
+    this.lodHighDistance = 90;        // beyond this → standard 3-D, closer → enhanced 3-D
+    this.treeLodFadeDistance = 24;
+    this.billboardTreeRenderFraction = 2 / 3;
 
     // View distance for tree chunks (in chunks)
     this.treeViewDistance = 8;
+    this.treeViewUnloadBufferChunks = 0.75;
+    this.treeFrustumCullPadding = 12;
 
     // ── State ──────────────────────────────────────────────────
     this.treeChunks = new Map();     // "cx,cz" → { trees[], lodMeshes, … }
@@ -49,10 +66,11 @@ class TreeManager {
     this.sharedReady = false;
     this.billboardGeo = null;
     this.billboardMat = null;
+    this.billboardMatLow = null;
+    this.trunkMaterialNear = null;
     this.trunkMaterialHigh = null;
-    this.trunkMaterialLow = null;
+    this.leafMaterialNear = null;
     this.leafMaterialHigh = null;
-    this.leafMaterialLow = null;
 
     // ── Geometry caches (keyed by seed hash) ───────────────────
     // We pre-build a small palette of tree geometries to instance from.
@@ -60,7 +78,34 @@ class TreeManager {
     this.nearGeometries = [];
     this.highGeometries = [];   // merged BufferGeometry per palette slot
     this.lowGeometries = [];
+    this.paletteMetrics = [];
     this.paletteDirty = true;
+
+    this.treeLodKeys = ['near', 'high', 'low', 'billboard'];
+    this.treeLodBitmask = {
+      near: 1,
+      high: 2,
+      low: 4,
+      billboard: 8,
+    };
+
+    this.treeStreamingIntervalMs = 50;
+    this.treeVisibilityIntervalMs = 33;
+    this.treeStreamingMoveThresholdSq = 4;
+    this.treeVisibilityMoveThresholdSq = 0.36;
+    this.treeVisibilityRotationThreshold = 0.02;
+    this.lastTreeStreamingTime = -Infinity;
+    this.lastTreeVisibilityTime = -Infinity;
+    this.lastTreeStreamingChunkX = Infinity;
+    this.lastTreeStreamingChunkZ = Infinity;
+    this.lastTreeStreamingViewer = new THREE.Vector3(Infinity, Infinity, Infinity);
+    this.lastTreeVisibilityViewer = new THREE.Vector3(Infinity, Infinity, Infinity);
+    this.lastTreeVisibilityYaw = NaN;
+    this.lastTreeVisibilityPitch = NaN;
+
+    this.treeUniforms = {
+      uViewerPos: { value: new THREE.Vector3(0, 0, 0) },
+    };
 
     // Reusable helpers
     this._v3 = new THREE.Vector3();
@@ -71,6 +116,7 @@ class TreeManager {
     this._scale = new THREE.Vector3(1, 1, 1);
     this._frustum = new THREE.Frustum();
     this._frustumMatrix = new THREE.Matrix4();
+    this._treeCullBox = new THREE.Box3();
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -104,15 +150,40 @@ class TreeManager {
       load('birch_bark_low.png', true),
       load('birch_leaves.png'),
       load('birch_leaves_low.png'),
+      load('birch_leaves_dense.png'),
+      load('birch_leaves_dense_low.png'),
       load('birch_billboard.png'),
       load('birch_billboard_low.png'),
-    ]).then(([barkHigh, barkLow, leavesHigh, leavesLow, billboardHigh, billboardLow]) => {
+    ]).then(([barkHigh, barkLow, leavesHigh, leavesLow, leavesDense, leavesDenseLow, billboardHigh, billboardLow]) => {
       this.textures.barkHigh = barkHigh;
       this.textures.barkLow = barkLow;
-      this.textures.leavesHigh = leavesHigh;
-      this.textures.leavesLow = leavesLow;
-      this.textures.billboardHigh = billboardHigh;
-      this.textures.billboardLow = billboardLow;
+      this.textures.leavesHigh = this.prepareTreeAlphaTexture(leavesHigh);
+      this.textures.leavesLow = this.prepareTreeAlphaTexture(leavesLow);
+      this.textures.leavesHighStable = this.createTreeTextureVariant(this.textures.leavesHigh, {
+        generateMipmaps: false,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+      });
+      this.textures.leavesLowStable = this.createTreeTextureVariant(this.textures.leavesLow, {
+        generateMipmaps: false,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+      });
+      // Dense composite leaf textures (6 clusters per quad)
+      this.textures.leavesDense = this.prepareTreeAlphaTexture(leavesDense);
+      this.textures.leavesDenseLow = this.prepareTreeAlphaTexture(leavesDenseLow);
+      this.textures.leavesDenseStable = this.createTreeTextureVariant(this.textures.leavesDense, {
+        generateMipmaps: false,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+      });
+      this.textures.leavesDenseLowStable = this.createTreeTextureVariant(this.textures.leavesDenseLow, {
+        generateMipmaps: false,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+      });
+      this.textures.billboardHigh = this.prepareTreeAlphaTexture(billboardHigh);
+      this.textures.billboardLow = this.prepareTreeAlphaTexture(billboardLow);
       this.texturesLoaded = true;
       this.buildSharedAssets();
     });
@@ -142,6 +213,106 @@ class TreeManager {
     return tex;
   }
 
+  prepareTreeAlphaTexture(texture) {
+    if (!texture) return texture;
+
+    const image = texture.image;
+    if (!image || !image.width || !image.height) {
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+      texture.premultiplyAlpha = false;
+      texture.needsUpdate = true;
+      return texture;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) return texture;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    this.bleedTransparentCanvasColors(ctx, canvas.width, canvas.height, 12);
+
+    texture.image = canvas;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.premultiplyAlpha = false;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  createTreeTextureVariant(texture, options = {}) {
+    if (!texture) return texture;
+
+    const variant = texture.clone();
+    variant.image = texture.image;
+    variant.encoding = texture.encoding;
+    variant.wrapS = options.wrapS ?? texture.wrapS;
+    variant.wrapT = options.wrapT ?? texture.wrapT;
+    variant.minFilter = options.minFilter ?? texture.minFilter;
+    variant.magFilter = options.magFilter ?? texture.magFilter;
+    variant.generateMipmaps = options.generateMipmaps ?? texture.generateMipmaps;
+    variant.premultiplyAlpha = options.premultiplyAlpha ?? texture.premultiplyAlpha;
+    variant.needsUpdate = true;
+    return variant;
+  }
+
+  bleedTransparentCanvasColors(ctx, width, height, iterations = 12) {
+    if (!ctx || width <= 0 || height <= 0) return;
+
+    let imageData = ctx.getImageData(0, 0, width, height);
+    let source = imageData.data;
+    const hasValidColor = new Uint8Array(width * height);
+
+    for (let i = 0; i < width * height; i++) {
+      hasValidColor[i] = source[i * 4 + 3] >= 250 ? 1 : 0;
+    }
+
+    for (let iteration = 0; iteration < iterations; iteration++) {
+      let changed = false;
+      const nextSource = new Uint8ClampedArray(source);
+      const nextValid = new Uint8Array(hasValidColor);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = y * width + x;
+          if (hasValidColor[idx]) continue;
+
+          let found = false;
+          for (let oy = -1; oy <= 1 && !found; oy++) {
+            for (let ox = -1; ox <= 1; ox++) {
+              if (ox === 0 && oy === 0) continue;
+              const nx = x + ox;
+              const ny = y + oy;
+              if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+
+              const nidx = ny * width + nx;
+              if (!hasValidColor[nidx]) continue;
+
+              nextSource[idx * 4 + 0] = source[nidx * 4 + 0];
+              nextSource[idx * 4 + 1] = source[nidx * 4 + 1];
+              nextSource[idx * 4 + 2] = source[nidx * 4 + 2];
+              nextValid[idx] = 1;
+              found = true;
+              changed = true;
+              break;
+            }
+          }
+        }
+      }
+
+      source = nextSource;
+      hasValidColor.set(nextValid);
+      if (!changed) break;
+    }
+
+    imageData.data.set(source);
+    ctx.putImageData(imageData, 0, 0);
+  }
+
   // ═══════════════════════════════════════════════════════════════
   //  SHARED ASSETS – materials, geometries, palette
   // ═══════════════════════════════════════════════════════════════
@@ -154,61 +325,181 @@ class TreeManager {
     // shift origin to bottom center so billboard sits on ground
     this.billboardGeo.translate(0, 11, 0);
 
-    this.billboardMat = new THREE.MeshLambertMaterial({
+    const billboardBase = {
+      color: 0xffffff,
+      transparent: false,
+      alphaTest: 0.45,
+      alphaToCoverage: false,
+      side: THREE.FrontSide,
+      depthWrite: true,
+      fog: true,
+      billboardMode: 'cylindrical-y',
+    };
+    this.billboardMat = this.createTreeLodMaterial({
       map: this.textures.billboardHigh,
-      color: 0xffffff,
-      transparent: true,
-      alphaTest: 0.3,
-      side: THREE.DoubleSide,
-      depthWrite: true,
-      fog: true,
-    });
+      ...billboardBase,
+    }, this.lodLowDistance, this.lodBillboardDistance);
 
-    this.billboardMatLow = new THREE.MeshLambertMaterial({
+    this.billboardMatLow = this.createTreeLodMaterial({
       map: this.textures.billboardLow || this.textures.billboardHigh,
-      color: 0xffffff,
-      transparent: true,
-      alphaTest: 0.3,
-      side: THREE.DoubleSide,
-      depthWrite: true,
-      fog: true,
-    });
+      ...billboardBase,
+    }, this.lodBillboardDistance, Infinity);
 
     // ── Trunk materials ──
-    this.trunkMaterialHigh = new THREE.MeshLambertMaterial({
+    const trunkBase = {
+      side: THREE.FrontSide,
+      fog: true,
+      depthWrite: true,
+      depthTest: true,
+    };
+    this.trunkMaterialNear = this.createTreeLodMaterial({
       map: this.textures.barkHigh,
       color: 0xbfb7ac,
-      side: THREE.FrontSide,
-      fog: true,
-    });
+      ...trunkBase,
+    }, 0, this.lodHighDistance);
 
-    this.trunkMaterialLow = new THREE.MeshLambertMaterial({
-      map: this.textures.barkLow || this.textures.barkHigh,
-      color: 0xb5ada2,
-      side: THREE.FrontSide,
-      fog: true,
-    });
+    this.trunkMaterialHigh = this.createTreeLodMaterial({
+      map: this.textures.barkHigh,
+      color: 0xbfb7ac,
+      ...trunkBase,
+    }, this.lodHighDistance, this.lodLowDistance);
 
     // ── Leaf materials ──
-    this.leafMaterialHigh = new THREE.MeshLambertMaterial({
-      map: this.textures.leavesHigh,
-      transparent: true,
-      alphaTest: 0.35,
+    const leafBaseNear = {
+      transparent: false,
+      alphaTest: 0.4,
+      alphaToCoverage: true,
       side: THREE.DoubleSide,
       fog: true,
-    });
+      depthWrite: true,
+      depthTest: true,
+    };
+    this.leafMaterialNear = this.createTreeLodMaterial({
+      map: this.textures.leavesDenseStable || this.textures.leavesDense || this.textures.leavesHigh,
+      ...leafBaseNear,
+    }, 0, this.lodHighDistance);
 
-    this.leafMaterialLow = new THREE.MeshLambertMaterial({
-      map: this.textures.leavesLow || this.textures.leavesHigh,
-      transparent: true,
-      alphaTest: 0.35,
+    const leafBaseHigh = {
+      transparent: false,
+      color: 0xaaaaaa,
+      alphaTest: 0.3,
+      alphaToCoverage: false,
       side: THREE.DoubleSide,
       fog: true,
-    });
+      depthWrite: true,
+      depthTest: true,
+      useDitherFade: false,
+    };
+    this.leafMaterialHigh = this.createTreeLodMaterial({
+      map: this.textures.leavesDenseLowStable || this.textures.leavesDenseLow || this.textures.leavesDenseStable || this.textures.leavesDense || this.textures.leavesLow,
+      ...leafBaseHigh,
+    }, this.lodHighDistance, this.lodLowDistance);
 
     // Build geometry palette
     this.buildGeometryPalette();
     this.sharedReady = true;
+  }
+
+  createTreeLodMaterial(materialOptions, visibleMinDistance = 0, visibleMaxDistance = Infinity, fadeDistance = this.treeLodFadeDistance, fadeInDistance = fadeDistance) {
+    const {
+      useDitherFade = true,
+      billboardMode = null,
+      ...meshMaterialOptions
+    } = materialOptions || {};
+    const maxDistance = Number.isFinite(visibleMaxDistance) ? visibleMaxDistance : 1e9;
+    const material = new THREE.MeshLambertMaterial({
+      ...meshMaterialOptions,
+      transparent: meshMaterialOptions.transparent === true,
+      alphaToCoverage: meshMaterialOptions.alphaToCoverage === true,
+      depthWrite: meshMaterialOptions.depthWrite ?? true,
+      depthTest: meshMaterialOptions.depthTest ?? true,
+      fog: meshMaterialOptions.fog !== false,
+    });
+
+    material.userData.treeLodUniforms = {
+      uTreeVisibleMin: { value: visibleMinDistance },
+      uTreeVisibleMax: { value: maxDistance },
+      uTreeFadeDistance: { value: fadeDistance },
+      uTreeFadeInDistance: { value: fadeInDistance },
+    };
+    material.userData.treeLodUseDitherFade = useDitherFade;
+    material.userData.treeLodBillboardMode = billboardMode;
+
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uTreeViewerPos = this.treeUniforms.uViewerPos;
+      shader.uniforms.uTreeVisibleMin = material.userData.treeLodUniforms.uTreeVisibleMin;
+      shader.uniforms.uTreeVisibleMax = material.userData.treeLodUniforms.uTreeVisibleMax;
+      shader.uniforms.uTreeFadeDistance = material.userData.treeLodUniforms.uTreeFadeDistance;
+      shader.uniforms.uTreeFadeInDistance = material.userData.treeLodUniforms.uTreeFadeInDistance;
+
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <common>',
+        `#include <common>
+        uniform vec3 uTreeViewerPos;
+        uniform float uTreeVisibleMin;
+        uniform float uTreeVisibleMax;
+        uniform float uTreeFadeDistance;
+        uniform float uTreeFadeInDistance;
+        varying float vTreeVisibility;`
+      );
+
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vec3 treeWorldRoot = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        #ifdef USE_INSTANCING
+          treeWorldRoot = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        #endif
+
+        ${material.userData.treeLodBillboardMode === 'cylindrical-y' ? `vec3 treeToViewer = uTreeViewerPos - treeWorldRoot;
+        float treeBillboardAngle = atan(treeToViewer.x, treeToViewer.z);
+        float treeBillboardSin = sin(treeBillboardAngle);
+        float treeBillboardCos = cos(treeBillboardAngle);
+        transformed.xz = vec2(
+          transformed.x * treeBillboardCos + transformed.z * treeBillboardSin,
+          -transformed.x * treeBillboardSin + transformed.z * treeBillboardCos
+        );` : ''}
+
+        float treeViewerDist = distance(treeWorldRoot, uTreeViewerPos);
+        float fadeIn = uTreeVisibleMin <= 0.0
+          ? 1.0
+          : smoothstep(uTreeVisibleMin - uTreeFadeInDistance, uTreeVisibleMin, treeViewerDist);
+        float fadeOut = uTreeVisibleMax > 1000000.0
+          ? 1.0
+          : 1.0 - smoothstep(uTreeVisibleMax - uTreeFadeDistance, uTreeVisibleMax, treeViewerDist);
+        vTreeVisibility = clamp(fadeIn * fadeOut, 0.0, 1.0);`
+      );
+
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <common>',
+        `#include <common>
+        varying float vTreeVisibility;
+
+        float treeHash12(vec2 p) {
+          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }`
+      );
+
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+        ${material.userData.treeLodUseDitherFade ? `if (vTreeVisibility < 0.999) {
+          float fadeDither = treeHash12(gl_FragCoord.xy);
+          if (fadeDither > vTreeVisibility) discard;
+        }` : ''}
+        diffuseColor.a *= vTreeVisibility;
+        if (diffuseColor.a < 0.01) discard;`
+      );
+    };
+
+    const mapKey = meshMaterialOptions && meshMaterialOptions.map ? meshMaterialOptions.map.uuid : 'no-map';
+    material.customProgramCacheKey = () => (
+      `tree-lod-v6-${mapKey}-${visibleMinDistance}-${Number.isFinite(visibleMaxDistance) ? visibleMaxDistance : 'inf'}-${fadeDistance}-${fadeInDistance}-${material.alphaToCoverage ? 'atc' : 'noatc'}-${material.userData.treeLodUseDitherFade ? 'dither' : 'nodither'}-${material.userData.treeLodBillboardMode || 'mesh'}`
+    );
+
+    return material;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -224,6 +515,117 @@ class TreeManager {
     return n;
   }
 
+  clamp01(value) {
+    return Math.max(0, Math.min(1, value));
+  }
+
+  smoothstep(edge0, edge1, x) {
+    if (edge0 === edge1) {
+      return x < edge0 ? 0 : 1;
+    }
+
+    const t = this.clamp01((x - edge0) / (edge1 - edge0));
+    return t * t * (3 - 2 * t);
+  }
+
+  getTreeElevationDensity(aboveSeaLevel) {
+    const lowDensity = this.smoothstep(
+      this.treeMinElevation - this.treeLowElevationFadeRange,
+      this.treeMinElevation + this.treeLowElevationFadeRange,
+      aboveSeaLevel
+    );
+    const highDensity = 1 - this.smoothstep(
+      this.treeMaxElevation - this.treeHighElevationFadeRange,
+      this.treeMaxElevation + this.treeHighElevationFadeRange,
+      aboveSeaLevel
+    );
+
+    return this.clamp01(lowDensity * highDensity);
+  }
+
+  sampleTreeNoise(worldX, worldZ, scale, offsetX, offsetZ) {
+    return this.noise.perlin2(
+      (worldX + offsetX) * scale,
+      (worldZ + offsetZ) * scale
+    ) * 0.5 + 0.5;
+  }
+
+  getTreeBaseDensity(worldX, worldZ) {
+    const noiseVal = this.sampleTreeNoise(
+      worldX,
+      worldZ,
+      this.treeNoiseScale,
+      this.treeNoiseOffsetX,
+      this.treeNoiseOffsetZ
+    );
+
+    if (noiseVal < this.treeNoiseThreshold) {
+      return 0;
+    }
+
+    return (noiseVal - this.treeNoiseThreshold) / (1 - this.treeNoiseThreshold);
+  }
+
+  getTreeForestAreaMask(worldX, worldZ) {
+    const jitterX = (this.sampleTreeNoise(
+      worldX,
+      worldZ,
+      this.treeForestMaskEdgeJitterScale,
+      this.treeForestMaskJitterOffsetX,
+      this.treeForestMaskJitterOffsetZ
+    ) - 0.5) * 2 * this.treeForestMaskEdgeJitterDistance;
+    const jitterZ = (this.sampleTreeNoise(
+      worldX,
+      worldZ,
+      this.treeForestMaskEdgeJitterScale,
+      this.treeForestMaskJitterOffsetX2,
+      this.treeForestMaskJitterOffsetZ2
+    ) - 0.5) * 2 * this.treeForestMaskEdgeJitterDistance;
+
+    const forestNoise = this.sampleTreeNoise(
+      worldX + jitterX,
+      worldZ + jitterZ,
+      this.treeForestMaskScale,
+      this.treeForestMaskOffsetX,
+      this.treeForestMaskOffsetZ
+    );
+
+    return this.smoothstep(
+      this.treeForestMaskThreshold - this.treeForestMaskEdgeFeather,
+      this.treeForestMaskThreshold + this.treeForestMaskEdgeFeather,
+      forestNoise
+    );
+  }
+
+  isTreeForestRegionEnabled(worldX, worldZ) {
+    const forestMask = this.getTreeForestAreaMask(worldX, worldZ);
+    if (forestMask <= 0) return false;
+    if (forestMask >= 1) return true;
+
+    const edgeRoll = this.hashTreeSeed(worldX * 4.91 + 137.2, worldZ * -6.37 - 281.4);
+    return edgeRoll < forestMask;
+  }
+
+  getTreeSpawnDensity(worldX, worldZ, aboveSeaLevel = null) {
+    const baseDensity = this.getTreeBaseDensity(worldX, worldZ);
+    if (baseDensity <= 0) {
+      return 0;
+    }
+
+    if (!this.isTreeForestRegionEnabled(worldX, worldZ)) {
+      return 0;
+    }
+
+    const elevationDensity = this.getTreeElevationDensity(
+      aboveSeaLevel ?? (this.terrain.getHeight(worldX, worldZ) - this.terrain.waterLevel)
+    );
+    if (elevationDensity <= 0) {
+      return 0;
+    }
+
+    return baseDensity * elevationDensity;
+  }
+
   /**
    * Build a small palette of pre-generated tree geometries for each LOD.
    * Trees in the world simply pick from this palette, avoiding per-tree geometry creation.
@@ -232,23 +634,30 @@ class TreeManager {
     this.nearGeometries = [];
     this.highGeometries = [];
     this.lowGeometries = [];
+    this.paletteMetrics = [];
 
     for (let i = 0; i < this.treePaletteSize; i++) {
       const seed = i / this.treePaletteSize;
-      this.nearGeometries.push(this.createTreeGeometry(seed, 'near'));
-      this.highGeometries.push(this.createTreeGeometry(seed, 'high'));
-      this.lowGeometries.push(this.createTreeGeometry(seed, 'low'));
+      const nearGeometry = this.createTreeGeometry(seed, 'near');
+      const highGeometry = this.createTreeGeometry(seed, 'high');
+      const lowGeometry = this.createTreeGeometry(seed, 'low');
+      this.nearGeometries.push(nearGeometry);
+      this.highGeometries.push(highGeometry);
+      this.lowGeometries.push(lowGeometry);
+      this.paletteMetrics.push(this.buildPaletteMetrics(nearGeometry, highGeometry, lowGeometry));
     }
   }
 
   /**
-   * Create a single procedural birch tree geometry (trunk + branches + leaf quads).
-   * Returns { trunk: BufferGeometry, leaves: BufferGeometry }
+  * Create a single procedural birch tree geometry (trunk + branches + leaf quads).
+  * Returns { trunk: BufferGeometry, leaves: BufferGeometry }
    */
   createTreeGeometry(seed, lod) {
     const rng = this.seededRandom(seed * 99999 + 7);
     const isNear = lod === 'near';
     const isHighDetail = lod === 'high' || isNear;
+    const sharedCloseLeafScale = 0.56;
+    const denseLeafBillboardScale = 1.55;
 
     // Tree parameters (vary with seed)
     const height = 12 + rng() * 10;            // 12-22
@@ -263,7 +672,11 @@ class TreeManager {
 
     // ── TRUNK ──
     const trunkGeo = this.createTrunkGeometry(
-      height, trunkRadius, trunkSegments, trunkRadialSegments, rng
+      height,
+      trunkRadius,
+      trunkSegments,
+      trunkRadialSegments,
+      rng
     );
 
     // ── BRANCHES + LEAVES ──
@@ -289,18 +702,18 @@ class TreeManager {
         length: branchLength,
         radius: trunkRadius * (isNear ? 0.22 : 0.25),
         lod,
-        depth: isNear ? 2 : 1,
         rng,
       });
     }
 
     // Add top canopy cluster
-    const topLeafSize = (isHighDetail ? (4 + rng() * 3) : (7 + rng() * 4)) * (isNear ? 0.5 : 1);
-    const topLeafCount = isNear ? 8 : lod === 'high' ? 4 : 2;
+    // Dense texture: fewer top-cap quads, each larger
+    const topLeafSize = (isHighDetail ? (4 + rng() * 3) : (7 + rng() * 4)) * (isHighDetail ? sharedCloseLeafScale * denseLeafBillboardScale : denseLeafBillboardScale);
+    const topLeafCount = isHighDetail ? 2 : 1;
     for (let t = 0; t < topLeafCount; t++) {
-      const spread = isNear ? 3.8 : 3;
+      const spread = 3;
       const ox = (rng() - 0.5) * spread;
-      const oy = crownTop + rng() * (isNear ? 2.0 : 1.5);
+      const oy = crownTop + rng() * 1.5;
       const oz = (rng() - 0.5) * spread;
       leafQuads.push(this.createLeafQuad(ox, oy, oz, topLeafSize, rng() * Math.PI, rng));
     }
@@ -330,31 +743,32 @@ class TreeManager {
       length,
       radius,
       lod,
-      depth,
       rng,
     } = options;
 
     const isNear = lod === 'near';
     const isHighDetail = lod === 'high' || isNear;
+    const sharedCloseLeafScale = 0.56;
+    const denseLeafBillboardScale = 1.55;
 
-    if (isHighDetail) {
-      branchGeos.push(
-        this.createBranchGeometry(baseX, baseY, baseZ, angle, pitch, length, radius, rng)
-      );
+    if (isNear) {
+      const branchGeo = this.createBranchGeometry(baseX, baseY, baseZ, angle, pitch, length, radius, rng);
+      branchGeos.push(branchGeo);
     }
 
     const tip = this.getBranchEndpoint(baseX, baseY, baseZ, angle, pitch, length);
+    // Dense texture covers multiple clusters per quad → keep quad count flat, upscale cards.
     const baseLeafCount = isHighDetail
-      ? (3 + Math.floor(rng() * 3))
+      ? (2 + Math.floor(rng() * 2))
       : (1 + Math.floor(rng() * 2));
-    const leafCount = isNear ? baseLeafCount * 2 : baseLeafCount;
-    const leafJitter = isNear ? 1.4 : 2.5;
-    const leafHeightJitter = isNear ? 0.8 : 1.5;
+    const leafCount = baseLeafCount;
+    const leafJitter = 2.8;
+    const leafHeightJitter = 1.8;
 
     for (let l = 0; l < leafCount; l++) {
       const along = 0.25 + (l / Math.max(leafCount - 1, 1)) * 0.75;
       const baseLeafSize = isHighDetail ? (3 + rng() * 2.5) : (5 + rng() * 3);
-      const leafSize = baseLeafSize * (isNear ? 0.5 : 1);
+      const leafSize = baseLeafSize * (isHighDetail ? sharedCloseLeafScale * denseLeafBillboardScale : denseLeafBillboardScale);
       const lx = baseX + (tip.x - baseX) * along + (rng() - 0.5) * leafJitter;
       const ly = baseY + (tip.y - baseY) * along + (rng() - 0.5) * leafHeightJitter;
       const lz = baseZ + (tip.z - baseZ) * along + (rng() - 0.5) * leafJitter;
@@ -362,33 +776,65 @@ class TreeManager {
         this.createLeafQuad(lx, ly, lz, leafSize, rng() * Math.PI, rng)
       );
     }
+  }
 
-    if (!isNear || depth <= 1) return;
+  expandPaletteMetricBounds(metric, geometry) {
+    if (!geometry) return;
 
-    const childBranchCount = 1 + Math.floor(rng() * 2);
-    for (let i = 0; i < childBranchCount; i++) {
-      const along = 0.35 + rng() * 0.4;
-      const childBaseX = baseX + (tip.x - baseX) * along;
-      const childBaseY = baseY + (tip.y - baseY) * along;
-      const childBaseZ = baseZ + (tip.z - baseZ) * along;
-      const childAngle = angle + (rng() > 0.5 ? 1 : -1) * (0.35 + rng() * 0.85);
-      const childPitch = pitch * (0.45 + rng() * 0.2) + 0.08 + rng() * 0.25;
-      const childLength = length * (0.3 + rng() * 0.25);
-      const childRadius = radius * (0.45 + rng() * 0.18);
+    const position = geometry.getAttribute('position');
+    if (!position || position.count === 0) return;
 
-      this.addBranchSystem(branchGeos, leafQuads, {
-        baseX: childBaseX,
-        baseY: childBaseY,
-        baseZ: childBaseZ,
-        angle: childAngle,
-        pitch: childPitch,
-        length: childLength,
-        radius: childRadius,
-        lod,
-        depth: depth - 1,
-        rng,
-      });
+    if (!geometry.boundingBox) {
+      geometry.computeBoundingBox();
     }
+
+    const box = geometry.boundingBox;
+    if (!box) return;
+
+    metric.minX = Math.min(metric.minX, box.min.x);
+    metric.minY = Math.min(metric.minY, box.min.y);
+    metric.minZ = Math.min(metric.minZ, box.min.z);
+    metric.maxX = Math.max(metric.maxX, box.max.x);
+    metric.maxY = Math.max(metric.maxY, box.max.y);
+    metric.maxZ = Math.max(metric.maxZ, box.max.z);
+  }
+
+  buildPaletteMetrics(...geoSets) {
+    const metric = {
+      minX: Infinity,
+      minY: Infinity,
+      minZ: Infinity,
+      maxX: -Infinity,
+      maxY: -Infinity,
+      maxZ: -Infinity,
+    };
+
+    for (const geoSet of geoSets) {
+      if (!geoSet) continue;
+      this.expandPaletteMetricBounds(metric, geoSet.trunk);
+      this.expandPaletteMetricBounds(metric, geoSet.leaves);
+    }
+
+    if (!Number.isFinite(metric.minX)) {
+      return {
+        radius: 10,
+        minY: 0,
+        maxY: 24,
+      };
+    }
+
+    const radius = Math.max(
+      Math.hypot(metric.minX, metric.minZ),
+      Math.hypot(metric.minX, metric.maxZ),
+      Math.hypot(metric.maxX, metric.minZ),
+      Math.hypot(metric.maxX, metric.maxZ)
+    );
+
+    return {
+      radius,
+      minY: metric.minY,
+      maxY: metric.maxY,
+    };
   }
 
   getBranchEndpoint(baseX, baseY, baseZ, angle, pitch, length) {
@@ -632,30 +1078,27 @@ class TreeManager {
         const wx = worldMinX + (gx + 0.15 + hash * 0.7) * cellSize;
         const wz = worldMinZ + (gz + 0.15 + hash2 * 0.7) * cellSize;
 
-        // Perlin noise value directly controls spawn probability.
-        // noiseVal is 0..1; at 1.0 every cell spawns a tree (dense forest).
-        const noiseVal = this.noise.perlin2(
-          (wx + this.treeNoiseOffsetX) * this.treeNoiseScale,
-          (wz + this.treeNoiseOffsetZ) * this.treeNoiseScale
-        ) * 0.5 + 0.5;
+        const baseDensity = this.getTreeBaseDensity(wx, wz);
+        if (baseDensity <= 0) continue;
 
-        if (noiseVal < this.treeNoiseThreshold) continue;
-
-        // Remap noise from [threshold..1] → [0..1] for spawn probability
-        const spawnChance = (noiseVal - this.treeNoiseThreshold) / (1 - this.treeNoiseThreshold);
-
-        // Use hash as a per-cell random roll; tree spawns when roll < spawnChance
-        const roll = this.hashTreeSeed(wx * 3.7, wz * 5.3);
-        if (roll > spawnChance) continue;
+        if (!this.isTreeForestRegionEnabled(wx, wz)) continue;
 
         // Terrain checks
         const height = this.terrain.getHeight(wx, wz);
         const aboveSeaLevel = height - this.terrain.waterLevel;
-        if (aboveSeaLevel < this.treeMinElevation || aboveSeaLevel > this.treeMaxElevation) continue;
+        const elevationDensity = this.getTreeElevationDensity(aboveSeaLevel);
+        if (elevationDensity <= 0.001) continue;
 
         // Slope check
         const normalY = this.terrain.getBaseNormalY(wx, wz);
         if (normalY < this.treeMaxSlope) continue;
+
+        // Broad forest mask acts as a separate binary gate; allowed regions keep normal density.
+        const spawnChance = baseDensity * elevationDensity;
+
+        // Use hash as a per-cell random roll; tree spawns when roll < spawnChance
+        const roll = this.hashTreeSeed(wx * 3.7, wz * 5.3);
+        if (roll > spawnChance) continue;
 
         // Road avoidance
         const roadInfo = this.terrain.getRoadInfluence(wx, wz, height);
@@ -694,24 +1137,22 @@ class TreeManager {
     const trees = chunk.trees;
 
     if (lod === 'billboard' || lod === 'low') {
-      return this.createBillboardInstances(trees, chunk.distSq);
+      return this.createBillboardInstances(trees, lod);
     }
 
     const geoPalette = lod === 'near' ? this.nearGeometries : this.highGeometries;
-    const trunkMat = this.trunkMaterialHigh;
-    const leafMat = this.leafMaterialHigh;
-
-    // Group trees by palette index for instancing
-    const byPalette = new Map();
-    for (const tree of trees) {
-      if (!byPalette.has(tree.paletteIdx)) byPalette.set(tree.paletteIdx, []);
-      byPalette.get(tree.paletteIdx).push(tree);
-    }
+    const trunkMat = lod === 'near' ? this.trunkMaterialNear : this.trunkMaterialHigh;
+    const leafMat = lod === 'near' ? this.leafMaterialNear : this.leafMaterialHigh;
+    const paletteGroups = chunk.paletteGroups || this.buildPaletteGroups(trees);
 
     const group = new THREE.Group();
     group.name = `trees-${lod}-${chunk.key}`;
+    group.matrixAutoUpdate = false;
 
-    for (const [paletteIdx, paletteTrees] of byPalette) {
+    for (let paletteIdx = 0; paletteIdx < paletteGroups.length; paletteIdx++) {
+      const paletteTrees = paletteGroups[paletteIdx];
+      if (!paletteTrees || paletteTrees.length === 0) continue;
+
       const geoSet = geoPalette[paletteIdx];
       if (!geoSet) continue;
 
@@ -719,7 +1160,9 @@ class TreeManager {
       if (geoSet.trunk && geoSet.trunk.getAttribute('position').count > 0) {
         const trunkMesh = new THREE.InstancedMesh(geoSet.trunk, trunkMat, paletteTrees.length);
         trunkMesh.frustumCulled = false; // we cull at chunk level
+        trunkMesh.matrixAutoUpdate = false;
         trunkMesh.userData.isTreeTrunk = true; // used by sun occlusion raycaster
+        trunkMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
         const mat4 = this._mat4;
         const quat = this._quat;
 
@@ -729,6 +1172,7 @@ class TreeManager {
           trunkMesh.setMatrixAt(i, mat4);
         }
         trunkMesh.instanceMatrix.needsUpdate = true;
+        trunkMesh.updateMatrix();
         group.add(trunkMesh);
       }
 
@@ -736,6 +1180,8 @@ class TreeManager {
       if (geoSet.leaves && geoSet.leaves.getAttribute('position').count > 0) {
         const leafMesh = new THREE.InstancedMesh(geoSet.leaves, leafMat, paletteTrees.length);
         leafMesh.frustumCulled = false;
+        leafMesh.matrixAutoUpdate = false;
+        leafMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
         const mat4 = this._mat4;
         const quat = this._quat;
 
@@ -745,10 +1191,13 @@ class TreeManager {
           leafMesh.setMatrixAt(i, mat4);
         }
         leafMesh.instanceMatrix.needsUpdate = true;
+        leafMesh.updateMatrix();
         group.add(leafMesh);
       }
     }
 
+    group.userData.treeLod = lod;
+    group.updateMatrix();
     return group;
   }
 
@@ -767,53 +1216,127 @@ class TreeManager {
     );
   }
 
-  createBillboardInstances(trees, distSq) {
+  createBillboardInstances(trees, lod = 'low') {
     if (trees.length === 0) return null;
 
-    // Use lower-res material for very far billboards
-    const mat = distSq > (this.lodBillboardDistance * 1.5) ** 2
+    const billboardTrees = this.getBillboardTreeSubset(trees);
+    if (billboardTrees.length === 0) return null;
+
+    const mat = lod === 'billboard'
       ? this.billboardMatLow
       : this.billboardMat;
 
-    const mesh = new THREE.InstancedMesh(this.billboardGeo, mat, trees.length);
+    const mesh = new THREE.InstancedMesh(this.billboardGeo, mat, billboardTrees.length);
     mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false;
     mesh.userData.isTreeBillboard = true;
+    mesh.userData.treeLod = lod;
+    mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
     const mat4 = this._mat4;
     const quat = this._quat;
 
-    for (let i = 0; i < trees.length; i++) {
-      const t = trees[i];
-      // Billboard – always face camera Y rotation: we set the rotation each frame
-      this.composeTreeMatrix(mat4, quat, t, 'billboard', t.rotY);
+    for (let i = 0; i < billboardTrees.length; i++) {
+      const t = billboardTrees[i];
+      this.composeTreeMatrix(mat4, quat, t, 'billboard', 0);
       mesh.setMatrixAt(i, mat4);
     }
     mesh.instanceMatrix.needsUpdate = true;
+    mesh.updateMatrix();
     return mesh;
+  }
+
+  getBillboardTreeSubset(trees) {
+    if (!Array.isArray(trees) || trees.length === 0) {
+      return [];
+    }
+
+    const subset = [];
+    const renderFraction = this.billboardTreeRenderFraction;
+
+    for (let i = 0; i < trees.length; i++) {
+      const tree = trees[i];
+      const selectionHash = this.hashTreeSeed(
+        tree.wx * 0.173 + tree.paletteIdx * 11.7 + tree.scale * 3.1,
+        tree.wz * 0.197 + tree.rotY * 0.37 + tree.height * 0.11
+      );
+
+      if (selectionHash < renderFraction) {
+        subset.push(tree);
+      }
+    }
+
+    if (subset.length === 0) {
+      subset.push(trees[0]);
+    }
+
+    return subset;
   }
 
   /**
    * Update billboard instances to face camera.
    */
   updateBillboards(cameraPosition) {
-    for (const [, chunk] of this.treeChunks) {
-      const mesh = chunk.meshGroup;
-      if (!mesh || !mesh.isInstancedMesh || !mesh.userData.isTreeBillboard) continue;
+    return;
+  }
 
-      const camAngle = Math.atan2(
-        cameraPosition.x - chunk.centerX,
-        cameraPosition.z - chunk.centerZ
-      );
+  getAngleDelta(a, b) {
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return Infinity;
+    let delta = a - b;
+    while (delta > Math.PI) delta -= Math.PI * 2;
+    while (delta < -Math.PI) delta += Math.PI * 2;
+    return Math.abs(delta);
+  }
 
-      const mat4 = this._mat4;
-      const quat = this._quat;
+  getTreeCameraAngles(camera) {
+    return {
+      yaw: camera && camera.rotation && Number.isFinite(camera.rotation.y) ? camera.rotation.y : 0,
+      pitch: camera && camera.rotation && Number.isFinite(camera.rotation.x) ? camera.rotation.x : 0,
+    };
+  }
 
-      for (let i = 0; i < chunk.trees.length; i++) {
-        const t = chunk.trees[i];
-        this.composeTreeMatrix(mat4, quat, t, 'billboard', camAngle);
-        mesh.setMatrixAt(i, mat4);
-      }
-      mesh.instanceMatrix.needsUpdate = true;
+  shouldRunTreeStreamingUpdate(viewer, pcx, pcz, now) {
+    if (!Number.isFinite(this.lastTreeStreamingTime)) return true;
+    if (pcx !== this.lastTreeStreamingChunkX || pcz !== this.lastTreeStreamingChunkZ) return true;
+
+    const dx = viewer.x - this.lastTreeStreamingViewer.x;
+    const dy = viewer.y - this.lastTreeStreamingViewer.y;
+    const dz = viewer.z - this.lastTreeStreamingViewer.z;
+    if (dx * dx + dy * dy + dz * dz >= this.treeStreamingMoveThresholdSq) return true;
+
+    return (now - this.lastTreeStreamingTime) >= this.treeStreamingIntervalMs;
+  }
+
+  shouldRunTreeVisibilityUpdate(viewer, cameraAngles, now) {
+    if (!Number.isFinite(this.lastTreeVisibilityTime)) return true;
+
+    const dx = viewer.x - this.lastTreeVisibilityViewer.x;
+    const dy = viewer.y - this.lastTreeVisibilityViewer.y;
+    const dz = viewer.z - this.lastTreeVisibilityViewer.z;
+    if (dx * dx + dy * dy + dz * dz >= this.treeVisibilityMoveThresholdSq) return true;
+
+    if (this.getAngleDelta(cameraAngles.yaw, this.lastTreeVisibilityYaw) >= this.treeVisibilityRotationThreshold) {
+      return true;
     }
+
+    if (this.getAngleDelta(cameraAngles.pitch, this.lastTreeVisibilityPitch) >= this.treeVisibilityRotationThreshold) {
+      return true;
+    }
+
+    return (now - this.lastTreeVisibilityTime) >= this.treeVisibilityIntervalMs;
+  }
+
+  recordTreeStreamingState(viewer, pcx, pcz, now) {
+    this.lastTreeStreamingTime = now;
+    this.lastTreeStreamingChunkX = pcx;
+    this.lastTreeStreamingChunkZ = pcz;
+    this.lastTreeStreamingViewer.copy(this.treeUniforms.uViewerPos.value);
+  }
+
+  recordTreeVisibilityState(viewer, cameraAngles, now) {
+    this.lastTreeVisibilityTime = now;
+    this.lastTreeVisibilityViewer.set(viewer.x, viewer.y, viewer.z);
+    this.lastTreeVisibilityYaw = cameraAngles.yaw;
+    this.lastTreeVisibilityPitch = cameraAngles.pitch;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -867,32 +1390,223 @@ class TreeManager {
       const centerX = minX + this.chunkWorldSize * 0.5;
       const centerZ = minZ + this.chunkWorldSize * 0.5;
       const baseY = this.terrain.getHeight(centerX, centerZ);
-      return new THREE.Box3(
-        new THREE.Vector3(minX, baseY - 2, minZ),
-        new THREE.Vector3(maxX, baseY + 30, maxZ)
-      );
+      return {
+        renderBounds: new THREE.Box3(
+          new THREE.Vector3(minX, baseY - 2, minZ),
+          new THREE.Vector3(maxX, baseY + 30, maxZ)
+        ),
+        lodBounds: new THREE.Box3(
+          new THREE.Vector3(minX, baseY - 1, minZ),
+          new THREE.Vector3(maxX, baseY + 1, maxZ)
+        ),
+      };
     }
 
-    let minY = Infinity;
-    let maxY = -Infinity;
+    let renderMinX = Infinity;
+    let renderMinY = Infinity;
+    let renderMinZ = Infinity;
+    let renderMaxX = -Infinity;
+    let renderMaxY = -Infinity;
+    let renderMaxZ = -Infinity;
+    let lodMinX = Infinity;
+    let lodMinY = Infinity;
+    let lodMinZ = Infinity;
+    let lodMaxX = -Infinity;
+    let lodMaxY = -Infinity;
+    let lodMaxZ = -Infinity;
+
     for (const tree of trees) {
-      if (tree.height < minY) minY = tree.height;
-      const treeTop = tree.height + tree.scale * 30;
-      if (treeTop > maxY) maxY = treeTop;
+      const paletteMetric = this.paletteMetrics[tree.paletteIdx] || { radius: 10, minY: 0, maxY: 24 };
+      const canopyRadius = paletteMetric.radius * tree.scale;
+      const treeMinY = tree.height + paletteMetric.minY * tree.scale;
+      const treeMaxY = tree.height + paletteMetric.maxY * tree.scale;
+
+      renderMinX = Math.min(renderMinX, tree.wx - canopyRadius);
+      renderMinY = Math.min(renderMinY, treeMinY);
+      renderMinZ = Math.min(renderMinZ, tree.wz - canopyRadius);
+      renderMaxX = Math.max(renderMaxX, tree.wx + canopyRadius);
+      renderMaxY = Math.max(renderMaxY, treeMaxY);
+      renderMaxZ = Math.max(renderMaxZ, tree.wz + canopyRadius);
+
+      lodMinX = Math.min(lodMinX, tree.wx);
+      lodMinY = Math.min(lodMinY, tree.height);
+      lodMinZ = Math.min(lodMinZ, tree.wz);
+      lodMaxX = Math.max(lodMaxX, tree.wx);
+      lodMaxY = Math.max(lodMaxY, tree.height);
+      lodMaxZ = Math.max(lodMaxZ, tree.wz);
     }
 
-    return new THREE.Box3(
-      new THREE.Vector3(minX, minY - 2, minZ),
-      new THREE.Vector3(maxX, maxY + 2, maxZ)
-    );
+    return {
+      renderBounds: new THREE.Box3(
+        new THREE.Vector3(renderMinX - 1, renderMinY - 2, renderMinZ - 1),
+        new THREE.Vector3(renderMaxX + 1, renderMaxY + 2, renderMaxZ + 1)
+      ),
+      lodBounds: new THREE.Box3(
+        new THREE.Vector3(lodMinX - 0.5, lodMinY - 0.5, lodMinZ - 0.5),
+        new THREE.Vector3(lodMaxX + 0.5, lodMaxY + 0.5, lodMaxZ + 0.5)
+      ),
+    };
   }
 
   getTreeChunkMinDistanceSq(chunk, worldX, worldY, worldZ) {
     if (!chunk) return Infinity;
-    if (chunk.bounds && this.terrain && typeof this.terrain.getBoundsMinDistanceSq === 'function') {
-      return this.terrain.getBoundsMinDistanceSq(chunk.bounds, worldX, worldY, worldZ);
+    if (chunk.lodBounds && this.terrain && typeof this.terrain.getBoundsMinDistanceSq === 'function') {
+      return this.terrain.getBoundsMinDistanceSq(chunk.lodBounds, worldX, worldY, worldZ);
     }
     return this.getChunkMinDistanceSq(chunk.cx, chunk.cz, worldX, worldZ);
+  }
+
+  isTreeChunkVisible(chunk) {
+    if (!chunk || !chunk.bounds) return true;
+    this._treeCullBox.copy(chunk.bounds);
+    this._treeCullBox.expandByScalar(this.treeFrustumCullPadding);
+    return this._frustum.intersectsBox(this._treeCullBox);
+  }
+
+  getTreeChunkDistanceRange(chunk, worldX, worldY, worldZ) {
+    const minSq = this.getTreeChunkMinDistanceSq(chunk, worldX, worldY, worldZ);
+    const lodBounds = chunk && chunk.lodBounds ? chunk.lodBounds : chunk && chunk.bounds ? chunk.bounds : null;
+    if (!lodBounds) {
+      return { minSq, maxSq: minSq };
+    }
+
+    const farX = Math.max(Math.abs(worldX - lodBounds.min.x), Math.abs(worldX - lodBounds.max.x));
+    const farY = Math.max(Math.abs(worldY - lodBounds.min.y), Math.abs(worldY - lodBounds.max.y));
+    const farZ = Math.max(Math.abs(worldZ - lodBounds.min.z), Math.abs(worldZ - lodBounds.max.z));
+
+    return {
+      minSq,
+      maxSq: farX * farX + farY * farY + farZ * farZ,
+    };
+  }
+
+  getTreeLodDistanceWindow(lod) {
+    const fade = this.treeLodFadeDistance;
+
+    switch (lod) {
+      case 'near':
+        return { min: 0, max: this.lodHighDistance, effectiveMin: 0, effectiveMax: this.lodHighDistance };
+      case 'high':
+        return {
+          min: this.lodHighDistance,
+          max: this.lodLowDistance,
+          effectiveMin: Math.max(0, this.lodHighDistance - fade),
+          effectiveMax: this.lodLowDistance,
+        };
+      case 'low':
+        return {
+          min: this.lodLowDistance,
+          max: this.lodBillboardDistance,
+          effectiveMin: Math.max(0, this.lodLowDistance - fade),
+          effectiveMax: this.lodBillboardDistance,
+        };
+      case 'billboard':
+      default:
+        return {
+          min: this.lodBillboardDistance,
+          max: Infinity,
+          effectiveMin: Math.max(0, this.lodBillboardDistance - fade),
+          effectiveMax: Infinity,
+        };
+    }
+  }
+
+  getActiveLodsForDistanceRange(minDist, maxDist) {
+    const activeLods = [];
+
+    for (const lodKey of this.treeLodKeys) {
+      const window = this.getTreeLodDistanceWindow(lodKey);
+      if (maxDist < window.effectiveMin || minDist > window.effectiveMax) continue;
+      activeLods.push(lodKey);
+    }
+
+    if (!activeLods.length) {
+      activeLods.push(this.getLodForDistance(minDist));
+    }
+
+    return activeLods;
+  }
+
+  getActiveLodMaskForDistanceRange(minDist, maxDist) {
+    let activeMask = 0;
+
+    for (const lodKey of this.treeLodKeys) {
+      const window = this.getTreeLodDistanceWindow(lodKey);
+      if (maxDist < window.effectiveMin || minDist > window.effectiveMax) continue;
+      activeMask |= this.treeLodBitmask[lodKey];
+    }
+
+    if (activeMask === 0) {
+      activeMask = this.treeLodBitmask[this.getLodForDistance(minDist)];
+    }
+
+    return activeMask;
+  }
+
+  getLodListFromMask(mask) {
+    const lods = [];
+    for (const lodKey of this.treeLodKeys) {
+      if (mask & this.treeLodBitmask[lodKey]) {
+        lods.push(lodKey);
+      }
+    }
+    return lods;
+  }
+
+  updateChunkLodMeshes(chunk, viewer, distanceRange = null) {
+    if (!chunk || !chunk.trees || chunk.trees.length === 0) {
+      if (chunk) {
+        chunk.activeLods = [];
+        chunk.currentLod = null;
+      }
+      return;
+    }
+
+    const range = distanceRange || this.getTreeChunkDistanceRange(chunk, viewer.x, viewer.y, viewer.z);
+    const minDist = Math.sqrt(range.minSq);
+    const maxDist = Math.sqrt(range.maxSq);
+    const activeLodMask = this.getActiveLodMaskForDistanceRange(minDist, maxDist);
+
+    chunk.distSq = range.minSq;
+    chunk.maxDistSq = range.maxSq;
+
+    if (!chunk.meshGroup) {
+      chunk.meshGroup = new THREE.Group();
+      chunk.meshGroup.name = `trees-${chunk.key}`;
+      chunk.meshGroup.matrixAutoUpdate = false;
+      chunk.meshGroup.updateMatrix();
+      this.scene.add(chunk.meshGroup);
+    }
+
+    if (chunk.activeLodMask !== activeLodMask) {
+      for (const lodKey of this.treeLodKeys) {
+        const lodBit = this.treeLodBitmask[lodKey];
+        const shouldBeActive = (activeLodMask & lodBit) !== 0;
+        let lodMesh = chunk.lodMeshCache[lodKey];
+
+        if (shouldBeActive) {
+          if (!lodMesh) {
+            lodMesh = this.createChunkLodMeshes(chunk, lodKey);
+            if (!lodMesh) continue;
+            chunk.lodMeshCache[lodKey] = lodMesh;
+          }
+
+          lodMesh.visible = true;
+          if (lodMesh.parent !== chunk.meshGroup) {
+            chunk.meshGroup.add(lodMesh);
+          }
+        } else if (lodMesh) {
+          lodMesh.visible = false;
+          if (lodMesh.parent === chunk.meshGroup) {
+            chunk.meshGroup.remove(lodMesh);
+          }
+        }
+      }
+
+      chunk.activeLodMask = activeLodMask;
+      chunk.activeLods = this.getLodListFromMask(activeLodMask);
+      chunk.currentLod = chunk.activeLods.length === 1 ? chunk.activeLods[0] : 'mixed';
+    }
   }
 
   /**
@@ -903,55 +1617,78 @@ class TreeManager {
 
     this.camera = camera;
     const viewer = this.getTreeViewerPosition(playerX, playerZ, camera);
+    this.treeUniforms.uViewerPos.value.set(viewer.x, viewer.y, viewer.z);
     const pcx = Math.floor(viewer.x / this.chunkWorldSize);
     const pcz = Math.floor(viewer.z / this.chunkWorldSize);
-    const needed = new Set();
-    const maxViewDist = this.treeViewDistance;
-    const maxViewDistanceSq = ((maxViewDist + 0.5) * this.chunkWorldSize) ** 2;
+    const now = typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+    const cameraAngles = this.getTreeCameraAngles(camera);
+    const shouldRunStreamingUpdate = this.shouldRunTreeStreamingUpdate(viewer, pcx, pcz, now);
+    const shouldRunVisibilityUpdate = shouldRunStreamingUpdate || this.shouldRunTreeVisibilityUpdate(viewer, cameraAngles, now);
+
+    if (!shouldRunStreamingUpdate && !shouldRunVisibilityUpdate) {
+      return;
+    }
 
     // Update camera frustum for culling
     this._frustumMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this._frustum.setFromProjectionMatrix(this._frustumMatrix);
 
+    if (!shouldRunStreamingUpdate) {
+      for (const [, chunk] of this.treeChunks) {
+        if (chunk.meshGroup) {
+          chunk.meshGroup.visible = this.isTreeChunkVisible(chunk);
+        }
+      }
+      this.recordTreeVisibilityState(viewer, cameraAngles, now);
+      return;
+    }
+
+    const needed = new Set();
+    const maxViewDist = this.treeViewDistance;
+    const maxLoadDistanceSq = ((maxViewDist + 0.5) * this.chunkWorldSize) ** 2;
+    const maxKeepDistanceSq = ((maxViewDist + 0.5 + this.treeViewUnloadBufferChunks) * this.chunkWorldSize) ** 2;
+    const loopViewDist = maxViewDist + Math.max(1, Math.ceil(this.treeViewUnloadBufferChunks));
+
     // Determine which chunks are needed and at what LOD
-    for (let dz = -maxViewDist; dz <= maxViewDist; dz++) {
-      for (let dx = -maxViewDist; dx <= maxViewDist; dx++) {
+    for (let dz = -loopViewDist; dz <= loopViewDist; dz++) {
+      for (let dx = -loopViewDist; dx <= loopViewDist; dx++) {
         const cx = pcx + dx;
         const cz = pcz + dz;
         const key = `${cx},${cz}`;
         const existing = this.treeChunks.get(key);
-        const distSq = existing
-          ? this.getTreeChunkMinDistanceSq(existing, viewer.x, viewer.y, viewer.z)
-          : this.getChunkMinDistanceSq(cx, cz, viewer.x, viewer.z);
-        const dist = Math.sqrt(distSq);
+        const horizontalDistSq = this.getChunkMinDistanceSq(cx, cz, viewer.x, viewer.z);
+        const distanceLimitSq = existing ? maxKeepDistanceSq : maxLoadDistanceSq;
+
+        if (horizontalDistSq > distanceLimitSq) continue;
+
+        const distanceRange = existing
+          ? this.getTreeChunkDistanceRange(existing, viewer.x, viewer.y, viewer.z)
+          : { minSq: horizontalDistSq, maxSq: Infinity };
+        const distSq = distanceRange.minSq;
 
         // Beyond view range
-        if (distSq > maxViewDistanceSq) continue;
+        if (!existing && distSq > maxLoadDistanceSq) continue;
 
         needed.add(key);
-        const desiredLod = this.getLodForDistance(dist);
 
         if (existing) {
-          existing.distSq = distSq;
-
-          // LOD transition?
-          if (existing.currentLod !== desiredLod) {
-            this.setChunkLod(existing, desiredLod);
-          }
+          existing.distSq = distanceRange.minSq;
+          existing.maxDistSq = distanceRange.maxSq;
+          this.updateChunkLodMeshes(existing, viewer, distanceRange);
 
           // Visibility (frustum cull at chunk level)
           if (existing.meshGroup) {
-            const chunkSphere = this.getChunkBoundingSphere(cx, cz);
-            const visible = this._frustum.intersectsSphere(chunkSphere);
-            if (existing.meshGroup.isGroup) {
-              existing.meshGroup.visible = visible;
-            } else {
-              existing.meshGroup.visible = visible;
-            }
+            existing.meshGroup.visible = this.isTreeChunkVisible(existing);
           }
         } else {
           // Create new tree chunk
-          this.createTreeChunk(cx, cz, key, distSq, desiredLod, viewer);
+          this.createTreeChunk(cx, cz, key, viewer);
+          const createdChunk = this.treeChunks.get(key);
+          if (createdChunk && createdChunk.meshGroup) {
+            createdChunk.meshGroup.visible = this.isTreeChunkVisible(createdChunk);
+          }
         }
       }
     }
@@ -964,8 +1701,8 @@ class TreeManager {
       }
     }
 
-    // Update billboards to face camera
-    this.updateBillboards(camera.position);
+    this.recordTreeStreamingState(viewer, pcx, pcz, now);
+    this.recordTreeVisibilityState(viewer, cameraAngles, now);
   }
 
   getChunkBoundingSphere(cx, cz) {
@@ -979,100 +1716,81 @@ class TreeManager {
     );
   }
 
-  createTreeChunk(cx, cz, key, distSq, lod, viewer = null) {
+  createTreeChunk(cx, cz, key, viewer = null) {
     const trees = this.getTreePositionsForChunk(cx, cz);
-    const bounds = this.buildTreeChunkBounds(cx, cz, trees);
-    if (trees.length === 0) {
-      // Still track the chunk so we don't re-compute
-      const chunk = {
-        cx, cz, key, trees: [], meshGroup: null, currentLod: lod,
-        centerX: (cx + 0.5) * this.chunkWorldSize,
-        centerZ: (cz + 0.5) * this.chunkWorldSize,
-        distSq,
-        bounds,
-        lodMeshCache: {},
-      };
-      if (viewer) {
-        chunk.distSq = this.getTreeChunkMinDistanceSq(chunk, viewer.x, viewer.y, viewer.z);
-      }
-      this.treeChunks.set(key, {
-        ...chunk,
-        currentLod: this.getLodForDistance(Math.sqrt(chunk.distSq)),
-      });
-      return;
-    }
+    const boundsInfo = this.buildTreeChunkBounds(cx, cz, trees);
 
     const chunk = {
-      cx, cz, key, trees, meshGroup: null, currentLod: null,
+      cx,
+      cz,
+      key,
+      trees,
+      paletteGroups: this.buildPaletteGroups(trees),
+      meshGroup: null,
+      currentLod: null,
+      activeLods: [],
+      activeLodMask: 0,
       centerX: (cx + 0.5) * this.chunkWorldSize,
       centerZ: (cz + 0.5) * this.chunkWorldSize,
-      distSq,
-      bounds,
+      distSq: Infinity,
+      maxDistSq: Infinity,
+      bounds: boundsInfo.renderBounds,
+      lodBounds: boundsInfo.lodBounds,
       lodMeshCache: {},
     };
 
     if (viewer) {
-      chunk.distSq = this.getTreeChunkMinDistanceSq(chunk, viewer.x, viewer.y, viewer.z);
-      lod = this.getLodForDistance(Math.sqrt(chunk.distSq));
+      const distanceRange = this.getTreeChunkDistanceRange(chunk, viewer.x, viewer.y, viewer.z);
+      chunk.distSq = distanceRange.minSq;
+      chunk.maxDistSq = distanceRange.maxSq;
     }
 
     this.treeChunks.set(key, chunk);
-    this.setChunkLod(chunk, lod);
-  }
 
-  setChunkLod(chunk, lod) {
-    if (chunk.currentLod === lod) return;
-
-    // Remove old mesh
-    if (chunk.meshGroup) {
-      chunk.meshGroup.visible = false;
-      this.scene.remove(chunk.meshGroup);
-    }
-
-    // Check cache
-    if (chunk.lodMeshCache[lod]) {
-      chunk.meshGroup = chunk.lodMeshCache[lod];
-      chunk.meshGroup.visible = true;
-      this.scene.add(chunk.meshGroup);
-      chunk.currentLod = lod;
+    if (!trees.length || !viewer) {
       return;
     }
 
-    // Create new mesh for this LOD
-    const meshGroup = lod === 'billboard'
-      ? this.createBillboardInstances(chunk.trees, chunk.distSq)
-      : this.createChunkLodMeshes(chunk, lod);
+    this.updateChunkLodMeshes(chunk, viewer, {
+      minSq: chunk.distSq,
+      maxSq: chunk.maxDistSq,
+    });
+  }
 
-    if (meshGroup) {
-      this.scene.add(meshGroup);
-      chunk.lodMeshCache[lod] = meshGroup;
+  buildPaletteGroups(trees) {
+    const groups = Array.from({ length: this.treePaletteSize }, () => []);
+    for (const tree of trees) {
+      groups[tree.paletteIdx].push(tree);
     }
-
-    chunk.meshGroup = meshGroup;
-    chunk.currentLod = lod;
+    return groups;
   }
 
   disposeTreeChunk(chunk) {
+    if (chunk.meshGroup) {
+      this.scene.remove(chunk.meshGroup);
+    }
+
     // Dispose all cached LOD meshes
     for (const lod in chunk.lodMeshCache) {
       const mesh = chunk.lodMeshCache[lod];
-      if (mesh) {
-        this.scene.remove(mesh);
-        if (mesh.isGroup) {
-          mesh.traverse((child) => {
-            if (child.isMesh || child.isInstancedMesh) {
-              // Don't dispose shared geometry/materials
-            }
-          });
-        }
-        // InstancedMesh dispose
-        if (mesh.isInstancedMesh) {
-          mesh.dispose();
-        }
+      if (!mesh) continue;
+      if (mesh.parent) {
+        mesh.parent.remove(mesh);
+      }
+
+      if (mesh.isGroup) {
+        mesh.traverse((child) => {
+          if (child.isInstancedMesh && typeof child.dispose === 'function') {
+            child.dispose();
+          }
+        });
+      } else if (mesh.isInstancedMesh && typeof mesh.dispose === 'function') {
+        mesh.dispose();
       }
     }
     chunk.lodMeshCache = {};
     chunk.meshGroup = null;
+    chunk.activeLods = [];
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1103,10 +1821,10 @@ class TreeManager {
     if (this.billboardGeo) this.billboardGeo.dispose();
     if (this.billboardMat) this.billboardMat.dispose();
     if (this.billboardMatLow) this.billboardMatLow.dispose();
+    if (this.trunkMaterialNear) this.trunkMaterialNear.dispose();
     if (this.trunkMaterialHigh) this.trunkMaterialHigh.dispose();
-    if (this.trunkMaterialLow) this.trunkMaterialLow.dispose();
+    if (this.leafMaterialNear) this.leafMaterialNear.dispose();
     if (this.leafMaterialHigh) this.leafMaterialHigh.dispose();
-    if (this.leafMaterialLow) this.leafMaterialLow.dispose();
 
     // Dispose textures
     for (const key in this.textures) {

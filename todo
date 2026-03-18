@@ -3,13 +3,11 @@
 Add weather. Clouds are randomized with multi-layered perlin noise so that somtimes there are no clouds at all, and sometimes there are a lot of clouds. This cloud "texture" should move across the sky at "weather-speed". Clouds get darker there more there are and when the sky is full of clouds, make it rain.
 
 
-For the second and last LOD of the grass, instead of placing the billboards in a X shape, simply place one isntead of two per isntance and just make them face the player.
 
 
+Since sometimes stuff will be visible form the top, here a few improvements to the grass billboards:
+- Add a "top" texture to the grass billboards, so that they look better when seen from above.
+ slowly fade this texture in when the camera is above the grass and the player is at least 4m above the ground.
+ - Make the grass billboards at the last LOD follow the camera vertically also so they look up and down. Limit this at a 45 degree angle.
 
 
-Improve tree quality:
-At trees closer than 100m:
-Half the size of the "leaves" / leave planes and add 2x more of the leaves instead.
-Trees further than 100m remain the same.
-Also make the trees branch more than once and place them not always perfectly vertical.
